@@ -1,0 +1,6 @@
+{
+  "name": "Instrop",
+  "description": "Fast, private wireless file transfer between Windows PCs and Android devices with end-to-end encryption and zero cloud uploads.",
+  "requestFramePermissions": ["camera"],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
