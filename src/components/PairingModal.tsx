@@ -32,11 +32,13 @@ export function PairingModal({
   const [copied, setCopied] = useState(false);
   const [copiedUrl, setCopiedUrl] = useState(false);
   const [scanError, setScanError] = useState<string | null>(null);
+  const [cameraReady, setCameraReady] = useState(false);
 
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
   const rafRef = useRef<number | null>(null);
+  const qrFileInputRef = useRef<HTMLInputElement | null>(null);
 
   const preferredOrigin = lanUrls[0] || window.location.origin;
   const pairUrl = selfDevice
@@ -66,9 +68,42 @@ export function PairingModal({
     };
   }, [open, selfDevice, pairUrl]);
 
+  const handleDecodedQrString = React.useCallback(
+    (rawInput: string): boolean => {
+      const raw = rawInput.trim();
+      if (!raw) return false;
+      try {
+        const parsed = new URL(raw);
+        const pairParam = parsed.searchParams.get('pair');
+        const currentEffective = serverOrigin || window.location.origin;
+        if (parsed.origin && parsed.origin !== currentEffective) {
+          onConnectToServer(parsed.origin, pairParam || undefined);
+          onClose();
+          return true;
+        }
+        if (pairParam && /^\d{6}$/.test(pairParam)) {
+          onPairByCode(pairParam);
+          onClose();
+          return true;
+        }
+      } catch {
+        // Not a full URL; fall through to raw 6-digit code extraction
+      }
+      const match = raw.match(/pair=(\d{6})/) || raw.match(/\b(\d{6})\b/);
+      if (match?.[1]) {
+        onPairByCode(match[1]);
+        onClose();
+        return true;
+      }
+      return false;
+    },
+    [onClose, onConnectToServer, onPairByCode, serverOrigin]
+  );
+
   // Camera QR Scanner lifecycle
   useEffect(() => {
     if (!open || tab !== 'scan-qr') {
+      setCameraReady(false);
       if (rafRef.current !== null) {
         cancelAnimationFrame(rafRef.current);
         rafRef.current = null;
@@ -82,16 +117,17 @@ export function PairingModal({
 
     let cancelled = false;
     setScanError(null);
+    setCameraReady(false);
 
     async function startScanner() {
       if (!navigator.mediaDevices?.getUserMedia) {
-        setScanError('Camera access is not available in this browser context. Use the 6-digit pairing code instead.');
+        setScanError('Live camera preview is blocked in this WebView. Use "Take Photo / Pick QR Image" below or enter the 6-digit code.');
         return;
       }
 
       try {
         const stream = await navigator.mediaDevices.getUserMedia({
-          video: { facingMode: 'environment' },
+          video: { facingMode: { ideal: 'environment' } },
           audio: false,
         });
         if (cancelled) {
@@ -101,14 +137,14 @@ export function PairingModal({
         streamRef.current = stream;
         if (videoRef.current) {
           videoRef.current.srcObject = stream;
-          await videoRef.current.play();
+          await videoRef.current.play().catch(() => undefined);
         }
 
         const tick = () => {
           if (cancelled) return;
           const video = videoRef.current;
           const canvas = canvasRef.current;
-          if (video && canvas && video.readyState === video.HAVE_ENOUGH_DATA) {
+          if (video && canvas && video.readyState >= video.HAVE_CURRENT_DATA && video.videoWidth > 0) {
             canvas.width = video.videoWidth;
             canvas.height = video.videoHeight;
             const ctx = canvas.getContext('2d', { willReadFrequently: true });
@@ -116,31 +152,8 @@ export function PairingModal({
               ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
               const imgData = ctx.getImageData(0, 0, canvas.width, canvas.height);
               const decoded = jsQR(imgData.data, imgData.width, imgData.height);
-              if (decoded?.data) {
-                const raw = decoded.data.trim();
-                try {
-                  const parsed = new URL(raw);
-                  const pairParam = parsed.searchParams.get('pair');
-                  const currentEffective = serverOrigin || window.location.origin;
-                  if (parsed.origin && parsed.origin !== currentEffective) {
-                    onConnectToServer(parsed.origin, pairParam || undefined);
-                    onClose();
-                    return;
-                  }
-                  if (pairParam && /^\d{6}$/.test(pairParam)) {
-                    onPairByCode(pairParam);
-                    onClose();
-                    return;
-                  }
-                } catch {
-                  // Not a full URL; fall through to raw 6-digit code extraction
-                }
-                const match = raw.match(/pair=(\d{6})/) || raw.match(/\b(\d{6})\b/);
-                if (match?.[1]) {
-                  onPairByCode(match[1]);
-                  onClose();
-                  return;
-                }
+              if (decoded?.data && handleDecodedQrString(decoded.data)) {
+                return;
               }
             }
           }
@@ -150,7 +163,7 @@ export function PairingModal({
         rafRef.current = requestAnimationFrame(tick);
       } catch {
         if (!cancelled) {
-          setScanError('Camera permission denied or no camera detected. Enter the 6-digit pairing code manually.');
+          setScanError('Camera permission was not granted to WebView. Allow Camera in Android Settings → Apps → Instrop, or tap "Take Photo / Pick QR Image" below.');
         }
       }
     }
@@ -159,6 +172,7 @@ export function PairingModal({
 
     return () => {
       cancelled = true;
+      setCameraReady(false);
       if (rafRef.current !== null) {
         cancelAnimationFrame(rafRef.current);
         rafRef.current = null;
@@ -168,7 +182,37 @@ export function PairingModal({
         streamRef.current = null;
       }
     };
-  }, [open, tab, serverOrigin, onClose, onConnectToServer, onPairByCode]);
+  }, [open, tab, handleDecodedQrString]);
+
+  const handleQrImagePick = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    e.target.value = '';
+    if (!file) return;
+
+    const img = new Image();
+    const url = URL.createObjectURL(file);
+    img.onload = () => {
+      URL.revokeObjectURL(url);
+      const canvas = document.createElement('canvas');
+      const maxDim = 1024;
+      const scale = Math.min(1, maxDim / Math.max(img.width, img.height));
+      canvas.width = Math.max(1, Math.round(img.width * scale));
+      canvas.height = Math.max(1, Math.round(img.height * scale));
+      const ctx = canvas.getContext('2d', { willReadFrequently: true });
+      if (!ctx) return;
+      ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+      const imgData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+      const decoded = jsQR(imgData.data, imgData.width, imgData.height);
+      if (!decoded?.data || !handleDecodedQrString(decoded.data)) {
+        setScanError('Could not read a valid Instrop QR code from that image. Try again or enter the 6-digit code.');
+      }
+    };
+    img.onerror = () => {
+      URL.revokeObjectURL(url);
+      setScanError('Unable to load the selected image.');
+    };
+    img.src = url;
+  };
 
   if (!open) return null;
 
@@ -209,7 +253,7 @@ export function PairingModal({
       aria-modal="true"
       aria-labelledby="pair-modal-title"
     >
-      <div className="w-full max-w-md rounded-2xl bg-white dark:bg-[#111114] border border-zinc-200 dark:border-zinc-800 shadow-2xl overflow-hidden">
+      <div className="w-full max-w-md max-h-[90dvh] overflow-y-auto rounded-2xl bg-white dark:bg-[#111114] border border-zinc-200 dark:border-zinc-800 shadow-2xl">
         <div className="flex items-center justify-between px-6 py-4 border-b border-zinc-200/80 dark:border-zinc-800/80">
           <h2 id="pair-modal-title" className="text-base font-semibold tracking-tight text-zinc-950 dark:text-zinc-50">
             Pair Device
@@ -373,27 +417,74 @@ export function PairingModal({
               {scanError ? (
                 <div className="rounded-xl border border-zinc-200 dark:border-zinc-800 bg-zinc-50 dark:bg-zinc-900/60 p-5 text-center space-y-3">
                   <Camera className="w-7 h-7 mx-auto text-zinc-400" />
-                  <p className="text-sm text-zinc-600 dark:text-zinc-300">{scanError}</p>
-                  <button
-                    type="button"
-                    onClick={() => setTab('enter-code')}
-                    className="min-h-[40px] px-4 py-2 rounded-lg bg-zinc-900 dark:bg-zinc-100 text-white dark:text-zinc-900 text-xs font-medium"
-                  >
-                    Enter Code Manually
-                  </button>
+                  <p className="text-xs leading-relaxed text-zinc-600 dark:text-zinc-300">{scanError}</p>
+                  <div className="flex flex-wrap items-center justify-center gap-2 pt-1">
+                    <button
+                      type="button"
+                      onClick={() => qrFileInputRef.current?.click()}
+                      className="min-h-[40px] px-4 py-2 rounded-lg bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-medium"
+                    >
+                      Take Photo / Pick QR Image
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setTab('enter-code')}
+                      className="min-h-[40px] px-4 py-2 rounded-lg bg-zinc-900 dark:bg-zinc-100 text-white dark:text-zinc-900 text-xs font-medium"
+                    >
+                      Enter Code
+                    </button>
+                  </div>
                 </div>
               ) : (
                 <div className="relative aspect-square w-full overflow-hidden rounded-xl bg-zinc-950 border border-zinc-800">
-                  <video ref={videoRef} playsInline muted className="w-full h-full object-cover" />
+                  <video
+                    ref={videoRef}
+                    autoPlay
+                    playsInline
+                    muted
+                    onPlaying={() => setCameraReady(true)}
+                    className={`w-full h-full object-cover transition-opacity duration-200 ${
+                      cameraReady ? 'opacity-100' : 'opacity-0 pointer-events-none'
+                    }`}
+                  />
                   <canvas ref={canvasRef} className="hidden" />
-                  <div className="pointer-events-none absolute inset-0 flex items-center justify-center">
-                    <div className="w-48 h-48 rounded-2xl border-2 border-indigo-400/80 shadow-[0_0_0_9999px_rgba(0,0,0,0.4)]" />
-                  </div>
+                  {!cameraReady && (
+                    <div className="absolute inset-0 flex flex-col items-center justify-center gap-2 text-zinc-400">
+                      <Camera className="w-7 h-7" />
+                      <span className="text-xs">Starting camera...</span>
+                    </div>
+                  )}
+                  {cameraReady && (
+                    <div className="pointer-events-none absolute inset-0 flex items-center justify-center">
+                      <div className="w-48 h-48 rounded-2xl border-2 border-indigo-400/80 shadow-[0_0_0_9999px_rgba(0,0,0,0.4)]" />
+                    </div>
+                  )}
                 </div>
               )}
-              <p className="text-xs text-center text-zinc-500 dark:text-zinc-400">
-                Point your camera at the Instrop QR code on your other device.
-              </p>
+
+              {!scanError && (
+                <div className="flex items-center justify-between gap-2 pt-1">
+                  <p className="text-xs text-zinc-500 dark:text-zinc-400">
+                    Point at QR code, or scan a photo:
+                  </p>
+                  <button
+                    type="button"
+                    onClick={() => qrFileInputRef.current?.click()}
+                    className="min-h-[36px] px-3 py-1.5 rounded-lg border border-zinc-200 dark:border-zinc-800 text-xs font-medium text-zinc-700 dark:text-zinc-200 hover:bg-zinc-50 dark:hover:bg-zinc-900 whitespace-nowrap shrink-0"
+                  >
+                    Scan Photo
+                  </button>
+                </div>
+              )}
+
+              <input
+                ref={qrFileInputRef}
+                type="file"
+                accept="image/*"
+                capture="environment"
+                className="hidden"
+                onChange={handleQrImagePick}
+              />
             </div>
           )}
         </div>

@@ -157,27 +157,29 @@ export default function App() {
           </button>
         </header>
 
-        {/* Mobile Top App Bar (Android / Compact Viewports) */}
-        <header className="md:hidden h-13 px-4 flex items-center justify-between border-b border-zinc-200/80 dark:border-zinc-800/80 bg-white/90 dark:bg-[#0C0C0F]/90 backdrop-blur-md sticky top-0 z-20">
-          <div className="flex items-center gap-2">
-            <InstropMark className="w-6 h-6 shrink-0" />
-            <span className="font-display text-sm font-bold tracking-tight text-zinc-950 dark:text-zinc-50 whitespace-nowrap">
-              Instrop
-            </span>
-          </div>
+        {/* Mobile Top App Bar (Android / Compact Viewports with Safe-Area Support) */}
+        <header className="md:hidden pt-[env(safe-area-inset-top)] border-b border-zinc-200/80 dark:border-zinc-800/80 bg-white/95 dark:bg-[#0C0C0F]/95 backdrop-blur-md sticky top-0 z-20">
+          <div className="h-14 px-4 flex items-center justify-between">
+            <div className="flex items-center gap-2">
+              <InstropMark className="w-6 h-6 shrink-0" />
+              <span className="font-display text-sm font-bold tracking-tight text-zinc-950 dark:text-zinc-50 whitespace-nowrap">
+                Instrop
+              </span>
+            </div>
 
-          <button
-            type="button"
-            onClick={() => setPairingOpen(true)}
-            className="min-h-[40px] px-3 py-1.5 rounded-lg bg-zinc-900 dark:bg-zinc-100 text-white dark:text-zinc-900 text-xs font-medium inline-flex items-center gap-1.5 whitespace-nowrap shrink-0"
-          >
-            <QrCode className="w-3.5 h-3.5" />
-            Pair
-          </button>
+            <button
+              type="button"
+              onClick={() => setPairingOpen(true)}
+              className="min-h-[40px] px-3 py-1.5 rounded-lg bg-zinc-900 dark:bg-zinc-100 text-white dark:text-zinc-900 text-xs font-medium inline-flex items-center gap-1.5 whitespace-nowrap shrink-0"
+            >
+              <QrCode className="w-3.5 h-3.5" />
+              Pair
+            </button>
+          </div>
         </header>
 
         {/* Scrollable Workspace Viewport */}
-        <main className="flex-1 w-full max-w-5xl mx-auto px-4 sm:px-6 lg:px-8 py-6 sm:py-8 pb-24 md:pb-12">
+        <main className="flex-1 w-full max-w-5xl mx-auto px-4 sm:px-6 lg:px-8 py-6 sm:py-8 pb-[calc(5.5rem+env(safe-area-inset-bottom))] md:pb-12">
           <AnimatePresence mode="wait">
             <motion.div
               key={activeTab}
@@ -272,34 +274,36 @@ export default function App() {
         </main>
       </div>
 
-      {/* Mobile Bottom Tab Bar (5 Consistent Tabs, <= 15% Viewport Height) */}
+      {/* Mobile Bottom Tab Bar (5 Consistent Tabs + Safe-Area Support) */}
       <nav
-        className="md:hidden fixed bottom-0 left-0 right-0 z-30 h-16 bg-white/95 dark:bg-[#0C0C0F]/95 backdrop-blur-md border-t border-zinc-200/80 dark:border-zinc-800/80 grid grid-cols-5 items-center"
+        className="md:hidden fixed bottom-0 left-0 right-0 z-30 pb-[env(safe-area-inset-bottom)] bg-white/95 dark:bg-[#0C0C0F]/95 backdrop-blur-md border-t border-zinc-200/80 dark:border-zinc-800/80"
         aria-label="Mobile navigation"
       >
-        {NAV_ITEMS.map(({ id, label, icon: Icon }) => {
-          const active = activeTab === id;
-          return (
-            <button
-              key={id}
-              type="button"
-              onClick={() => setActiveTab(id)}
-              className={`min-h-[48px] flex flex-col items-center justify-center gap-0.5 text-[10px] font-medium transition-colors relative ${
-                active
-                  ? 'text-indigo-600 dark:text-indigo-400'
-                  : 'text-zinc-500 dark:text-zinc-400'
-              }`}
-            >
-              <Icon className="w-5 h-5" />
-              <span className="truncate max-w-full px-1">{label}</span>
-              {id === 'transfers' && activeTransferCount > 0 && (
-                <span className="absolute top-1.5 right-3 font-mono text-[9px] font-semibold text-indigo-600 dark:text-indigo-400 tabular-nums">
-                  {activeTransferCount}
-                </span>
-              )}
-            </button>
-          );
-        })}
+        <div className="h-16 grid grid-cols-5 items-center">
+          {NAV_ITEMS.map(({ id, label, icon: Icon }) => {
+            const active = activeTab === id;
+            return (
+              <button
+                key={id}
+                type="button"
+                onClick={() => setActiveTab(id)}
+                className={`min-h-[48px] flex flex-col items-center justify-center gap-0.5 text-[10px] font-medium transition-colors relative ${
+                  active
+                    ? 'text-indigo-600 dark:text-indigo-400'
+                    : 'text-zinc-500 dark:text-zinc-400'
+                }`}
+              >
+                <Icon className="w-5 h-5" />
+                <span className="truncate max-w-full px-1">{label}</span>
+                {id === 'transfers' && activeTransferCount > 0 && (
+                  <span className="absolute top-1.5 right-3 font-mono text-[9px] font-semibold text-indigo-600 dark:text-indigo-400 tabular-nums">
+                    {activeTransferCount}
+                  </span>
+                )}
+              </button>
+            );
+          })}
+        </div>
       </nav>
 
       {/* Modals & Live Toasts */}
