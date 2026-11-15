@@ -1,15 +1,49 @@
 {
-  "name": "react-example",
+  "name": "instrop",
   "private": true,
-  "version": "0.0.0",
+  "version": "1.0.0",
   "type": "module",
+  "main": "dist-electron/main.cjs",
   "scripts": {
     "dev": "tsx server.ts",
     "build": "vite build",
+    "build:exe": "vite build && esbuild electron/main.ts --bundle --platform=node --format=cjs --outfile=dist-electron/main.cjs --external:electron --external:vite --external:bufferutil --external:utf-8-validate && electron-builder --win",
     "start": "node server.ts",
     "preview": "vite preview",
-    "clean": "rm -rf dist server.js",
+    "clean": "rm -rf dist dist-electron release server.js",
     "lint": "tsc --noEmit"
+  },
+  "build": {
+    "appId": "com.instrop.app",
+    "productName": "Instrop",
+    "directories": {
+      "output": "release",
+      "buildResources": "build"
+    },
+    "files": [
+      "dist/**/*",
+      "dist-electron/**/*",
+      "build/icon.ico",
+      "!node_modules/**/*"
+    ],
+    "win": {
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "icon": "build/icon.ico"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "Instrop"
+    }
   },
   "dependencies": {
     "@google/genai": "^2.4.0",

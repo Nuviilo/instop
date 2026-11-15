@@ -7,11 +7,11 @@ import { WebSocketServer, WebSocket } from 'ws';
 import type { RawData } from 'ws';
 import type { PeerDevice, MdnsLanPeer, DeviceOS, DeviceType } from './src/types/instrop.ts';
 
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
+const serverDir =
+  typeof __dirname !== 'undefined' ? __dirname : path.dirname(fileURLToPath(import.meta.url));
 
-const PORT = Number(process.env.PORT) || 3000;
-const IS_PROD = process.env.NODE_ENV === 'production';
+const DEFAULT_PORT = Number(process.env.PORT) || 3000;
+const DEFAULT_IS_PROD = process.env.NODE_ENV === 'production';
 
 interface ConnectedClient {
   ws: WebSocket;
@@ -121,7 +121,7 @@ function generateUniquePairingCode(): string {
   return String(Math.floor(100000 + Math.random() * 900000));
 }
 
-async function initMdnsService() {
+async function initMdnsService(port: number) {
   try {
     const { Bonjour } = await import('bonjour-service');
     const bonjour = new Bonjour();
@@ -130,7 +130,7 @@ async function initMdnsService() {
     bonjour.publish({
       name: `Instrop (${hostName})`,
       type: 'instrop',
-      port: PORT,
+      port,
       txt: {
         protocol: 'instrop-v1',
         host: hostName,
@@ -162,7 +162,20 @@ async function initMdnsService() {
   }
 }
 
-async function startServer() {
+export interface StartServerOptions {
+  port?: number;
+  isProd?: boolean;
+  distDir?: string;
+}
+
+export async function startInstropServer(options: StartServerOptions = {}): Promise<{
+  port: number;
+  close: () => void;
+}> {
+  const port = options.port ?? DEFAULT_PORT;
+  const isProd = options.isProd ?? DEFAULT_IS_PROD;
+  const distPath = options.distDir || path.resolve(serverDir, 'dist');
+
   const app = express();
   app.use(express.json());
 
@@ -177,7 +190,7 @@ async function startServer() {
 
   app.get('/api/network-info', (_req, res) => {
     res.json({
-      lanUrls: getLocalLanUrls(PORT),
+      lanUrls: getLocalLanUrls(port),
       hostname: os.hostname(),
       mdnsPeers: Array.from(mdnsDiscoveredPeers.values()),
     });
@@ -195,7 +208,6 @@ async function startServer() {
 
     ws.on('message', (data: RawData, isBinary: boolean) => {
       if (isBinary) {
-        // Binary chunk frame: [4-byte uint32 metaLen][UTF-8 JSON meta][encrypted chunk bytes]
         const buf = Buffer.isBuffer(data) ? data : Buffer.from(data as ArrayBuffer);
         if (buf.length < 4) return;
         const metaLen = buf.readUInt32BE(0);
@@ -235,7 +247,6 @@ async function startServer() {
         const deviceId = String(msg.id || '').trim();
         if (!deviceId) return;
 
-        // Close stale socket if reconnecting with same deviceId
         const existing = clients.get(deviceId);
         if (existing && existing.ws !== ws && existing.ws.readyState === WebSocket.OPEN) {
           existing.ws.close(4001, 'Replaced by newer session');
@@ -276,7 +287,7 @@ async function startServer() {
         sendJson(ws, {
           type: 'device:registered',
           device,
-          lanUrls: getLocalLanUrls(PORT),
+          lanUrls: getLocalLanUrls(port),
           mdnsPeers: Array.from(mdnsDiscoveredPeers.values()),
         });
 
@@ -356,7 +367,6 @@ async function startServer() {
         return;
       }
 
-      // Forward targeted signaling and transfer control events
       const targetId = typeof msg.targetId === 'string' ? msg.targetId : '';
       if (targetId) {
         const target = clients.get(targetId);
@@ -387,7 +397,7 @@ async function startServer() {
     });
   });
 
-  if (!IS_PROD) {
+  if (!isProd) {
     const { createServer: createViteServer } = await import('vite');
     const vite = await createViteServer({
       server: { middlewareMode: true },
@@ -395,17 +405,33 @@ async function startServer() {
     });
     app.use(vite.middlewares);
   } else {
-    const distPath = path.resolve(__dirname, 'dist');
     app.use(express.static(distPath));
     app.get('*', (_req, res) => {
       res.sendFile(path.join(distPath, 'index.html'));
     });
   }
 
-  server.listen(PORT, '0.0.0.0', () => {
-    console.log(`Instrop server running at http://0.0.0.0:${PORT}`);
-    void initMdnsService();
+  const boundPort = await new Promise<number>((resolve, reject) => {
+    server.once('error', reject);
+    server.listen(port, '0.0.0.0', () => {
+      const addr = server.address();
+      const actualPort = typeof addr === 'object' && addr ? addr.port : port;
+      resolve(actualPort);
+    });
   });
+
+  console.log(`Instrop server running at http://0.0.0.0:${boundPort}`);
+  void initMdnsService(boundPort);
+
+  return {
+    port: boundPort,
+    close: () => {
+      wss.close();
+      server.close();
+    },
+  };
 }
 
-void startServer();
+if (!process.versions?.electron) {
+  void startInstropServer();
+}
