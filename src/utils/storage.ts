@@ -3,6 +3,7 @@ import type {
   TransferHistoryEntry,
   TrustedDeviceRecord,
 } from '../types/instrop';
+import { isMobileViewportOrAgent } from './mobileBridge';
 
 const DEVICE_ID_KEY = 'instrop.device.id.v1';
 const SETTINGS_KEY = 'instrop.settings.v1';
@@ -19,12 +20,16 @@ export function getOrCreateDeviceId(): string {
 }
 
 export function loadSettings(defaultDeviceName: string): InstropSettings {
+  const defaultFolderLabel = isMobileViewportOrAgent()
+    ? 'Documents/Instrop'
+    : 'Browser Downloads';
+
   const fallback: InstropSettings = {
     deviceName: defaultDeviceName,
     receivingPermission: 'ask',
     autoAcceptTrusted: true,
     saveMode: 'auto',
-    downloadFolderLabel: 'Browser Downloads',
+    downloadFolderLabel: defaultFolderLabel,
     theme: 'system',
     notificationsEnabled: false,
     chunkSizeKb: 128,

@@ -243,7 +243,9 @@ export default function App() {
                   onPause={engine.pauseTransfer}
                   onResume={engine.resumeTransfer}
                   onCancel={engine.cancelTransfer}
-                  onDownloadFile={engine.triggerDownload}
+                  onDownloadFile={(url, filename) =>
+                    void engine.triggerDownload(url, filename, true)
+                  }
                   onDownloadFolderZip={(id) => void engine.downloadFolderAsZip(id)}
                   onClearCompleted={engine.clearCompletedTransfers}
                   onGoHome={() => setActiveTab('home')}
@@ -267,6 +269,7 @@ export default function App() {
                   onConnectToServer={engine.connectToServer}
                   onUpdateSettings={engine.updateSettings}
                   onRevokeTrusted={engine.revokeTrustedDevice}
+                  onNotify={engine.pushToast}
                 />
               )}
             </motion.div>

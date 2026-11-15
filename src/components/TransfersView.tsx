@@ -340,10 +340,10 @@ export function TransfersView({
                             <button
                               type="button"
                               onClick={() => onDownloadFile(file.downloadUrl!, file.name)}
-                              className="min-h-[30px] px-2.5 py-1 rounded-lg border border-zinc-200 dark:border-zinc-800 text-zinc-800 dark:text-zinc-200 hover:bg-zinc-50 dark:hover:bg-zinc-900 font-medium inline-flex items-center gap-1"
+                              className="min-h-[36px] px-3 py-1.5 rounded-lg border border-zinc-200 dark:border-zinc-800 text-zinc-800 dark:text-zinc-200 hover:bg-zinc-50 dark:hover:bg-zinc-900 font-medium inline-flex items-center gap-1.5"
                             >
-                              <Download className="w-3 h-3" />
-                              Save
+                              <Download className="w-3.5 h-3.5" />
+                              {file.savedToDisk ? 'Save Again' : 'Save'}
                             </button>
                           )}
                         </div>

@@ -19,6 +19,15 @@ import type {
   ThemeMode,
   TrustedDeviceRecord,
 } from '../types/instrop';
+import {
+  clearStoredDirectoryHandle,
+  enableNotificationsForPlatform,
+  hasCapacitorFilesystem,
+  isNativeCapacitorApp,
+  pickDesktopDirectory,
+  playNotificationChime,
+  supportsDesktopDirectoryPicker,
+} from '../utils/mobileBridge';
 
 interface SettingsViewProps {
   settings: InstropSettings;
@@ -29,6 +38,11 @@ interface SettingsViewProps {
   onConnectToServer: (origin: string) => void;
   onUpdateSettings: (patch: Partial<InstropSettings>) => void;
   onRevokeTrusted: (id: string) => void;
+  onNotify: (toast: {
+    title: string;
+    detail?: string;
+    tone: 'info' | 'success' | 'warning' | 'error';
+  }) => void;
 }
 
 export function SettingsView({
@@ -40,10 +54,15 @@ export function SettingsView({
   onConnectToServer,
   onUpdateSettings,
   onRevokeTrusted,
+  onNotify,
 }: SettingsViewProps) {
   const [nameInput, setNameInput] = useState(settings.deviceName);
   const [nameSaved, setNameSaved] = useState(false);
   const [serverInput, setServerInput] = useState(serverOrigin);
+  const [folderEditorOpen, setFolderEditorOpen] = useState(false);
+  const [customFolderInput, setCustomFolderInput] = useState(
+    settings.downloadFolderLabel || 'Documents/Instrop'
+  );
 
   const handleSaveName = (e: React.FormEvent) => {
     e.preventDefault();
@@ -56,33 +75,65 @@ export function SettingsView({
   const handleToggleNotifications = async () => {
     if (settings.notificationsEnabled) {
       onUpdateSettings({ notificationsEnabled: false });
+      onNotify({
+        title: 'Transfer notifications paused',
+        tone: 'info',
+      });
       return;
     }
-    if (typeof Notification === 'undefined') {
-      onUpdateSettings({ notificationsEnabled: false });
-      return;
+
+    const result = await enableNotificationsForPlatform();
+    onUpdateSettings({ notificationsEnabled: result.enabled });
+
+    if (result.enabled) {
+      playNotificationChime();
+      onNotify({
+        title: 'Transfer notifications enabled',
+        detail: result.message,
+        tone: 'success',
+      });
+    } else {
+      onNotify({
+        title: 'Notifications blocked',
+        detail: result.message,
+        tone: 'warning',
+      });
     }
-    if (Notification.permission === 'granted') {
-      onUpdateSettings({ notificationsEnabled: true });
-      return;
-    }
-    const perm = await Notification.requestPermission();
-    onUpdateSettings({ notificationsEnabled: perm === 'granted' });
   };
 
   const handleChooseDownloadLabel = async () => {
-    const win = window as Window & {
-      showDirectoryPicker?: () => Promise<{ name: string }>;
-    };
-    if (win.showDirectoryPicker) {
-      try {
-        const dir = await win.showDirectoryPicker();
-        onUpdateSettings({ downloadFolderLabel: dir.name });
+    if (supportsDesktopDirectoryPicker()) {
+      const picked = await pickDesktopDirectory();
+      if (picked.status === 'picked') {
+        onUpdateSettings({ downloadFolderLabel: picked.name });
+        setFolderEditorOpen(false);
+        onNotify({
+          title: 'Download folder updated',
+          detail: `Incoming files will save directly to "${picked.name}".`,
+          tone: 'success',
+        });
         return;
-      } catch {
-        // User canceled directory picker
+      }
+      if (picked.status === 'canceled') {
+        return;
       }
     }
+
+    // Mobile / Android / Fallback: toggle inline destination folder selector
+    setCustomFolderInput(settings.downloadFolderLabel || 'Documents/Instrop');
+    setFolderEditorOpen((prev) => !prev);
+  };
+
+  const applyPresetFolder = async (label: string) => {
+    await clearStoredDirectoryHandle();
+    onUpdateSettings({ downloadFolderLabel: label });
+    setCustomFolderInput(label);
+    setFolderEditorOpen(false);
+    onNotify({
+      title: 'Destination folder updated',
+      detail: `Files will save to ${label}.`,
+      tone: 'success',
+    });
   };
 
   return (
@@ -202,23 +253,81 @@ export function SettingsView({
           </h2>
         </div>
 
-        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
-          <div>
-            <p className="text-sm font-medium text-zinc-900 dark:text-zinc-100">
-              Destination folder
-            </p>
-            <p className="text-xs font-mono text-zinc-500 dark:text-zinc-400 mt-0.5">
-              {settings.downloadFolderLabel}
-            </p>
-          </div>
-          {'showDirectoryPicker' in window && (
+        <div className="space-y-3">
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+            <div>
+              <p className="text-sm font-medium text-zinc-900 dark:text-zinc-100">
+                Destination folder
+              </p>
+              <p className="text-xs font-mono text-zinc-500 dark:text-zinc-400 mt-0.5">
+                {settings.downloadFolderLabel}
+              </p>
+            </div>
             <button
               type="button"
               onClick={() => void handleChooseDownloadLabel()}
               className="min-h-[38px] px-3.5 py-1.5 rounded-xl border border-zinc-200 dark:border-zinc-800 text-xs font-medium text-zinc-700 dark:text-zinc-200 hover:bg-zinc-50 dark:hover:bg-zinc-900 transition-colors whitespace-nowrap self-start sm:self-auto"
             >
-              Change Folder
+              {folderEditorOpen ? 'Close Picker' : 'Change Folder'}
             </button>
+          </div>
+
+          {folderEditorOpen && (
+            <div className="rounded-xl border border-zinc-200 dark:border-zinc-800 bg-zinc-50/80 dark:bg-zinc-900/60 p-3.5 space-y-3">
+              <p className="text-xs font-medium text-zinc-700 dark:text-zinc-300">
+                Choose mobile / browser save folder
+              </p>
+              <div className="flex flex-wrap gap-2">
+                {(['Documents/Instrop', 'Downloads/Instrop', 'Browser Downloads'] as const).map(
+                  (preset) => (
+                    <button
+                      key={preset}
+                      type="button"
+                      onClick={() => void applyPresetFolder(preset)}
+                      className={`min-h-[36px] px-3 py-1.5 rounded-lg border text-xs font-mono transition-colors ${
+                        settings.downloadFolderLabel === preset
+                          ? 'border-indigo-500 bg-indigo-50 dark:bg-indigo-950/40 text-indigo-700 dark:text-indigo-300'
+                          : 'border-zinc-200 dark:border-zinc-700 bg-white dark:bg-[#111114] text-zinc-700 dark:text-zinc-300'
+                      }`}
+                    >
+                      {preset}
+                    </button>
+                  )
+                )}
+              </div>
+
+              <form
+                onSubmit={(e) => {
+                  e.preventDefault();
+                  const cleaned = customFolderInput.trim();
+                  if (!cleaned) return;
+                  void applyPresetFolder(cleaned);
+                }}
+                className="flex flex-col sm:flex-row gap-2"
+              >
+                <input
+                  type="text"
+                  value={customFolderInput}
+                  onChange={(e) => setCustomFolderInput(e.target.value)}
+                  placeholder="Documents/Instrop"
+                  aria-label="Custom folder path"
+                  className="flex-1 h-9 px-3 rounded-lg border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-[#111114] font-mono text-xs text-zinc-950 dark:text-zinc-50 focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                />
+                <button
+                  type="submit"
+                  className="min-h-[36px] px-3.5 py-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-medium whitespace-nowrap"
+                >
+                  Apply Folder
+                </button>
+              </form>
+
+              {isNativeCapacitorApp() && !hasCapacitorFilesystem() && (
+                <p className="text-[11px] text-amber-700 dark:text-amber-400">
+                  Tip: Install <code className="font-mono">@capacitor/filesystem</code> and run{' '}
+                  <code className="font-mono">npx cap sync android</code> so Android saves straight into this folder.
+                </p>
+              )}
+            </div>
           )}
         </div>
 
@@ -284,7 +393,13 @@ export function SettingsView({
           ))}
         </div>
 
-        <label className="flex items-center justify-between gap-4 pt-2 border-t border-zinc-200/70 dark:border-zinc-800/70 cursor-pointer">
+        <button
+          type="button"
+          role="switch"
+          aria-checked={settings.notificationsEnabled}
+          onClick={() => void handleToggleNotifications()}
+          className="w-full text-left flex items-center justify-between gap-4 pt-3 border-t border-zinc-200/70 dark:border-zinc-800/70 min-h-[52px]"
+        >
           <div className="flex items-start gap-2.5">
             <Bell className="w-4 h-4 text-zinc-500 mt-0.5 shrink-0" />
             <div>
@@ -296,13 +411,21 @@ export function SettingsView({
               </p>
             </div>
           </div>
-          <input
-            type="checkbox"
-            checked={settings.notificationsEnabled}
-            onChange={() => void handleToggleNotifications()}
-            className="w-4 h-4 rounded border-zinc-300 text-indigo-600 focus:ring-indigo-500"
-          />
-        </label>
+          <span
+            aria-hidden="true"
+            className={`relative inline-flex h-6 w-11 shrink-0 items-center rounded-full transition-colors ${
+              settings.notificationsEnabled
+                ? 'bg-indigo-600'
+                : 'bg-zinc-300 dark:bg-zinc-700'
+            }`}
+          >
+            <span
+              className={`inline-block h-4 w-4 transform rounded-full bg-white shadow-sm transition-transform ${
+                settings.notificationsEnabled ? 'translate-x-6' : 'translate-x-1'
+              }`}
+            />
+          </span>
+        </button>
       </section>
 
       {/* Network & Windows Startup */}

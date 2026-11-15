@@ -40,6 +40,10 @@ import {
   saveTransferHistory,
   saveTrustedDevices,
 } from '../utils/storage';
+import {
+  dispatchPlatformNotification,
+  saveReceivedFileToDevice,
+} from '../utils/mobileBridge';
 
 export type ConnectionState = 'connecting' | 'connected' | 'reconnecting' | 'offline';
 
@@ -160,12 +164,7 @@ export function useInstropEngine() {
 
   const fireBrowserNotification = useCallback((title: string, body: string) => {
     if (!settingsRef.current.notificationsEnabled) return;
-    if (typeof Notification === 'undefined' || Notification.permission !== 'granted') return;
-    try {
-      new Notification(title, { body });
-    } catch {
-      // Ignore if blocked by browser context
-    }
+    void dispatchPlatformNotification(title, body);
   }, []);
 
   const appendHistory = useCallback((entry: TransferHistoryEntry) => {
@@ -264,17 +263,55 @@ export function useInstropEngine() {
     return false;
   }, []);
 
-  const triggerDownload = useCallback((url: string, filename: string) => {
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = filename;
-    a.style.display = 'none';
-    document.body.appendChild(a);
-    a.click();
-    window.setTimeout(() => {
-      document.body.removeChild(a);
-    }, 250);
-  }, []);
+  const triggerDownload = useCallback(
+    async (
+      url: string,
+      filename: string,
+      isUserGesture = true,
+      blob?: Blob
+    ) => {
+      let resolvedBlob = blob;
+      if (!resolvedBlob) {
+        for (const job of receiverJobsRef.current.values()) {
+          for (const f of job.files.values()) {
+            if (f.downloadUrl === url && f.blob) {
+              resolvedBlob = f.blob;
+              break;
+            }
+          }
+          if (resolvedBlob) break;
+        }
+      }
+
+      const result = await saveReceivedFileToDevice({
+        url,
+        filename,
+        blob: resolvedBlob,
+        saveMode: settingsRef.current.saveMode,
+        downloadFolderLabel: settingsRef.current.downloadFolderLabel,
+        isUserGesture,
+      });
+
+      if (result.ok) {
+        if (isUserGesture) {
+          pushToast({
+            title: `Saved ${filename}`,
+            detail: result.savedTo ? `Location: ${result.savedTo}` : undefined,
+            tone: 'success',
+          });
+        }
+      } else if (!result.canceled && (isUserGesture || result.needsNativePlugin)) {
+        pushToast({
+          title: 'Could not save file directly',
+          detail: result.error || 'Enable file saving permissions or use a modern browser.',
+          tone: 'warning',
+        });
+      }
+
+      return result;
+    },
+    [pushToast]
+  );
 
   const downloadFolderAsZip = useCallback(
     async (transferId: string) => {
@@ -305,7 +342,7 @@ export function useInstropEngine() {
         setTransfers((prev) =>
           prev.map((t) => (t.transferId === transferId ? { ...t, zipDownloadUrl: url } : t))
         );
-        triggerDownload(url, zipName);
+        void triggerDownload(url, zipName, true, blob);
       });
     },
     [pushToast, triggerDownload]
@@ -1018,11 +1055,8 @@ export function useInstropEngine() {
         // Release intermediate chunk references once Blob is materialized
         fileState.chunks = [];
 
-        let savedToDisk = false;
-        if (verified && settingsRef.current.saveMode === 'auto' && !job.isFolder) {
-          triggerDownload(url, fileState.manifest.name);
-          savedToDisk = true;
-        }
+        const shouldAutoSave =
+          verified && settingsRef.current.saveMode === 'auto' && !job.isFolder;
 
         setTransfers((prev) =>
           prev.map((batch) =>
@@ -1037,7 +1071,7 @@ export function useInstropEngine() {
                           verified,
                           downloadUrl: url,
                           previewUrl: fileState.previewUrl,
-                          savedToDisk,
+                          savedToDisk: false,
                         }
                       : f
                   ),
@@ -1045,6 +1079,25 @@ export function useInstropEngine() {
               : batch
           )
         );
+
+        if (shouldAutoSave) {
+          void triggerDownload(url, fileState.manifest.name, false, blob).then((res) => {
+            if (res.ok) {
+              setTransfers((prev) =>
+                prev.map((batch) =>
+                  batch.transferId === transferId
+                    ? {
+                        ...batch,
+                        files: batch.files.map((f) =>
+                          f.fileId === fileId ? { ...f, savedToDisk: true } : f
+                        ),
+                      }
+                    : batch
+                )
+              );
+            }
+          });
+        }
         return;
       }
 
@@ -1645,6 +1698,7 @@ export function useInstropEngine() {
     transfers,
     incomingRequests,
     toasts,
+    pushToast,
     dismissToast,
     updateSettings,
     trustPeer,
