@@ -74,12 +74,14 @@ interface SenderJob {
   bytesSent: number;
   startedAt: number;
   paused: boolean;
+  pausedByDisconnect: boolean;
   canceled: boolean;
   resumeResolver: (() => void) | null;
   ackWaiter: (() => void) | null;
   dc: RTCDataChannel | null;
   pc: RTCPeerConnection | null;
   transportMode: 'p2p-webrtc' | 'e2e-relay';
+  lastUiUpdateAt: number;
 }
 
 interface ReceiverFileState {
@@ -88,6 +90,10 @@ interface ReceiverFileState {
   chunks: Uint8Array[];
   bytesReceived: number;
   chunksReceived: number;
+  nextExpectedChunkIndex: number;
+  outOfOrderBuffer: Map<number, { ivB64: string; ciphertext: Uint8Array }>;
+  expectedCompleteSha?: string;
+  finalized: boolean;
   blob?: Blob;
   downloadUrl?: string;
   previewUrl?: string;
@@ -111,6 +117,10 @@ interface ReceiverJob {
   pc: RTCPeerConnection | null;
   dc: RTCDataChannel | null;
   transportMode: 'p2p-webrtc' | 'e2e-relay';
+  processingQueue: Promise<void>;
+  batchCompleteReceived: boolean;
+  batchFinalized: boolean;
+  lastUiUpdateAt: number;
 }
 
 const DEFAULT_ICE_SERVERS: RTCIceServer[] = [
@@ -145,6 +155,7 @@ export function useInstropEngine() {
   const reconnectAttemptRef = useRef<number>(0);
   const reconnectTimerRef = useRef<number | null>(null);
   const pendingPairFromUrlRef = useRef<string | null>(null);
+  const ensureConnectedRef = useRef<(() => Promise<boolean>) | null>(null);
 
   settingsRef.current = settings;
   trustedRef.current = trustedDevices;
@@ -348,8 +359,157 @@ export function useInstropEngine() {
     [pushToast, triggerDownload]
   );
 
+  const finalizeReceivedFile = useCallback(
+    (job: ReceiverJob, fileState: ReceiverFileState) => {
+      if (fileState.finalized) return;
+      fileState.finalized = true;
+
+      const expectedSha = fileState.expectedCompleteSha || '';
+      const actualSha = fileState.sha256.digestHex();
+      const verified = Boolean(expectedSha) && actualSha === expectedSha;
+      fileState.expectedSha256 = expectedSha;
+      fileState.verified = verified;
+
+      const parts = fileState.chunks.map((c) => {
+        const copy = new Uint8Array(c.byteLength);
+        copy.set(c);
+        return copy.buffer;
+      });
+      const blob = new Blob(parts, {
+        type: fileState.manifest.mimeType || 'application/octet-stream',
+      });
+      fileState.blob = blob;
+      const url = URL.createObjectURL(blob);
+      fileState.downloadUrl = url;
+      if (fileState.manifest.mimeType.startsWith('image/')) {
+        fileState.previewUrl = url;
+      }
+      // Release intermediate chunk references once Blob is materialized
+      fileState.chunks = [];
+
+      const shouldAutoSave =
+        verified && settingsRef.current.saveMode === 'auto' && !job.isFolder;
+
+      setTransfers((prev) =>
+        prev.map((batch) =>
+          batch.transferId === job.transferId
+            ? {
+                ...batch,
+                bytesTransferred: job.bytesReceived,
+                files: batch.files.map((f) =>
+                  f.fileId === fileState.manifest.fileId
+                    ? {
+                        ...f,
+                        bytesTransferred: fileState.bytesReceived,
+                        chunksTransferred: fileState.chunksReceived,
+                        sha256: actualSha,
+                        verified,
+                        downloadUrl: url,
+                        previewUrl: fileState.previewUrl,
+                        savedToDisk: false,
+                      }
+                    : f
+                ),
+              }
+            : batch
+        )
+      );
+
+      if (shouldAutoSave) {
+        void triggerDownload(url, fileState.manifest.name, false, blob).then((res) => {
+          if (res.ok) {
+            setTransfers((prev) =>
+              prev.map((batch) =>
+                batch.transferId === job.transferId
+                  ? {
+                      ...batch,
+                      files: batch.files.map((f) =>
+                        f.fileId === fileState.manifest.fileId
+                          ? { ...f, savedToDisk: true }
+                          : f
+                      ),
+                    }
+                  : batch
+              )
+            );
+          }
+        });
+      }
+    },
+    [triggerDownload]
+  );
+
+  const finalizeReceivedBatch = useCallback(
+    (job: ReceiverJob) => {
+      if (job.batchFinalized || !job.batchCompleteReceived) return;
+      const allFilesDone = job.fileOrder.every((id) => job.files.get(id)?.finalized);
+      if (!allFilesDone) return;
+
+      job.batchFinalized = true;
+      const completedAt = Date.now();
+      const avgSpeed = job.totalSize / Math.max(0.2, (completedAt - job.startedAt) / 1000);
+      const allVerified = job.fileOrder.every((id) => job.files.get(id)?.verified);
+
+      setTransfers((prev) =>
+        prev.map((b) =>
+          b.transferId === job.transferId
+            ? {
+                ...b,
+                status: allVerified ? 'completed' : 'failed',
+                bytesTransferred: job.bytesReceived,
+                etaSeconds: 0,
+                completedAt,
+                errorMessage: allVerified ? undefined : 'Integrity verification mismatch (SHA-256).',
+              }
+            : b
+        )
+      );
+
+      appendHistory({
+        id: job.transferId,
+        direction: 'received',
+        peerId: job.peer.id,
+        peerName: job.peer.name,
+        peerOs: job.peer.os,
+        isFolder: job.isFolder,
+        folderName: job.folderName,
+        files: job.fileOrder.map((id) => {
+          const f = job.files.get(id)!;
+          return {
+            name: f.manifest.name,
+            relativePath: f.manifest.relativePath,
+            size: f.manifest.size,
+            mimeType: f.manifest.mimeType,
+            sha256: f.expectedSha256 || '',
+            verified: Boolean(f.verified),
+          };
+        }),
+        totalSize: job.totalSize,
+        status: allVerified ? 'completed' : 'failed',
+        startedAt: job.startedAt,
+        completedAt,
+        averageSpeedBps: avgSpeed,
+      });
+
+      if (allVerified && job.isFolder && settingsRef.current.saveMode === 'zip-folders') {
+        void downloadFolderAsZip(job.transferId);
+      }
+
+      fireBrowserNotification(
+        'Instrop — Files Received',
+        `Received ${job.fileOrder.length} item${job.fileOrder.length > 1 ? 's' : ''} from ${job.peer.name}`
+      );
+      pushToast({
+        title: allVerified ? 'Files received & verified' : 'Checksum mismatch',
+        detail: `${job.fileOrder.length} item${job.fileOrder.length > 1 ? 's' : ''} from ${job.peer.name}`,
+        tone: allVerified ? 'success' : 'error',
+      });
+    },
+    [appendHistory, downloadFolderAsZip, fireBrowserNotification, pushToast]
+  );
+
   const handleIncomingBinaryChunk = useCallback(
-    async (buffer: ArrayBuffer) => {
+    (buffer: ArrayBuffer) => {
       const unpacked = unpackBinaryChunkFrame(buffer);
       if (!unpacked) return;
       const { meta, ciphertext } = unpacked;
@@ -359,79 +519,117 @@ export function useInstropEngine() {
       const fileId = String(meta.fileId || '');
       const ivB64 = String(meta.iv || '');
       const senderId = String(meta.senderId || '');
+      const chunkIndex = Number(meta.chunkIndex ?? -1);
 
       const job = receiverJobsRef.current.get(transferId);
       if (!job || job.canceled) return;
       const fileState = job.files.get(fileId);
-      if (!fileState) return;
+      if (!fileState || fileState.finalized) return;
 
-      try {
-        const iv = base64ToUint8(ivB64);
-        const plain = await decryptChunk(job.aesKey, iv, ciphertext);
+      // Serialize decryption, SHA-256 hashing, and chunk ordering per transfer job
+      job.processingQueue = job.processingQueue.then(async () => {
+        if (job.canceled || fileState.finalized) return;
 
-        fileState.sha256.update(plain);
-        fileState.chunks.push(plain);
-        fileState.bytesReceived += plain.byteLength;
-        fileState.chunksReceived += 1;
-        job.bytesReceived += plain.byteLength;
+        try {
+          if (chunkIndex >= 0) {
+            if (chunkIndex < fileState.nextExpectedChunkIndex) {
+              return; // Duplicate chunk ignored
+            }
+            fileState.outOfOrderBuffer.set(chunkIndex, { ivB64, ciphertext });
+          } else {
+            fileState.outOfOrderBuffer.set(fileState.nextExpectedChunkIndex, {
+              ivB64,
+              ciphertext,
+            });
+          }
 
-        const elapsedSec = Math.max(0.15, (Date.now() - job.startedAt) / 1000);
-        const speedBps = job.bytesReceived / elapsedSec;
-        const remainingBytes = Math.max(0, job.totalSize - job.bytesReceived);
-        const etaSeconds = speedBps > 0 ? remainingBytes / speedBps : null;
+          let processedAny = false;
+          while (fileState.outOfOrderBuffer.has(fileState.nextExpectedChunkIndex)) {
+            const entry = fileState.outOfOrderBuffer.get(fileState.nextExpectedChunkIndex)!;
+            fileState.outOfOrderBuffer.delete(fileState.nextExpectedChunkIndex);
 
-        // Send sliding-window ACK every 8 chunks or at file end
-        if (
-          fileState.chunksReceived % 8 === 0 ||
-          fileState.chunksReceived >= fileState.manifest.totalChunks
-        ) {
-          sendWsJson({
-            type: 'transfer:ack',
-            targetId: senderId,
-            transferId,
-            fileId,
-            ackedChunkIndex: Number(meta.chunkIndex ?? fileState.chunksReceived - 1),
-          });
+            const iv = base64ToUint8(entry.ivB64);
+            const plain = await decryptChunk(job.aesKey, iv, entry.ciphertext);
+
+            fileState.sha256.update(plain);
+            fileState.chunks.push(plain);
+            fileState.bytesReceived += plain.byteLength;
+            fileState.chunksReceived += 1;
+            fileState.nextExpectedChunkIndex += 1;
+            job.bytesReceived += plain.byteLength;
+            processedAny = true;
+          }
+
+          if (!processedAny) return;
+
+          // Send sliding-window ACK every 8 chunks or at file end
+          if (
+            fileState.chunksReceived % 8 === 0 ||
+            fileState.nextExpectedChunkIndex >= fileState.manifest.totalChunks
+          ) {
+            sendWsJson({
+              type: 'transfer:ack',
+              targetId: senderId,
+              transferId,
+              fileId,
+              ackedChunkIndex: fileState.nextExpectedChunkIndex - 1,
+            });
+          }
+
+          const now = Date.now();
+          const isFileDone = fileState.nextExpectedChunkIndex >= fileState.manifest.totalChunks;
+          if (isFileDone || now - job.lastUiUpdateAt >= 100) {
+            job.lastUiUpdateAt = now;
+            const elapsedSec = Math.max(0.15, (now - job.startedAt) / 1000);
+            const speedBps = job.bytesReceived / elapsedSec;
+            const remainingBytes = Math.max(0, job.totalSize - job.bytesReceived);
+            const etaSeconds = speedBps > 0 ? remainingBytes / speedBps : null;
+            const fileIndex = job.fileOrder.indexOf(fileId);
+
+            setTransfers((prev) =>
+              prev.map((batch) => {
+                if (batch.transferId !== transferId) return batch;
+                return {
+                  ...batch,
+                  bytesTransferred: job.bytesReceived,
+                  speedBps,
+                  etaSeconds,
+                  currentFileIndex: fileIndex >= 0 ? fileIndex : batch.currentFileIndex,
+                  files: batch.files.map((f) =>
+                    f.fileId === fileId
+                      ? {
+                          ...f,
+                          bytesTransferred: fileState.bytesReceived,
+                          chunksTransferred: fileState.chunksReceived,
+                        }
+                      : f
+                  ),
+                };
+              })
+            );
+          }
+
+          if (fileState.expectedCompleteSha !== undefined && isFileDone) {
+            finalizeReceivedFile(job, fileState);
+            finalizeReceivedBatch(job);
+          }
+        } catch (err) {
+          job.canceled = true;
+          setTransfers((prev) =>
+            prev.map((b) =>
+              b.transferId === transferId
+                ? {
+                    ...b,
+                    status: 'failed',
+                    errorMessage: err instanceof Error ? err.message : 'Decryption failed',
+                  }
+                : b
+            )
+          );
         }
-
-        const fileIndex = job.fileOrder.indexOf(fileId);
-        setTransfers((prev) =>
-          prev.map((batch) => {
-            if (batch.transferId !== transferId) return batch;
-            return {
-              ...batch,
-              bytesTransferred: job.bytesReceived,
-              speedBps,
-              etaSeconds,
-              currentFileIndex: fileIndex >= 0 ? fileIndex : batch.currentFileIndex,
-              files: batch.files.map((f) =>
-                f.fileId === fileId
-                  ? {
-                      ...f,
-                      bytesTransferred: fileState.bytesReceived,
-                      chunksTransferred: fileState.chunksReceived,
-                    }
-                  : f
-              ),
-            };
-          })
-        );
-      } catch (err) {
-        job.canceled = true;
-        setTransfers((prev) =>
-          prev.map((b) =>
-            b.transferId === transferId
-              ? {
-                  ...b,
-                  status: 'failed',
-                  errorMessage: err instanceof Error ? err.message : 'Decryption failed',
-                }
-              : b
-          )
-        );
-      }
+      });
     },
-    [sendWsJson]
+    [finalizeReceivedBatch, finalizeReceivedFile, sendWsJson]
   );
 
   const runSenderLoop = useCallback(
@@ -488,54 +686,107 @@ export function useInstropEngine() {
               ciphertext
             );
 
-            // Prefer open WebRTC P2P DataChannel, otherwise E2E encrypted WebSocket binary relay
-            if (job.dc && job.dc.readyState === 'open') {
-              while (job.dc.bufferedAmount > 2 * 1024 * 1024) {
-                if (job.canceled) break;
-                await new Promise((r) => setTimeout(r, 15));
+            // Send frame cleanly, recovering automatically if WS briefly reconnects
+            let sentFrame = false;
+            while (!sentFrame && !job.canceled) {
+              const sctpMax = job.pc?.sctp?.maxMessageSize || 65536;
+              const safeDcLimit = Math.min(sctpMax, 196 * 1024) - 512;
+              const canUseDc =
+                Boolean(job.dc && job.dc.readyState === 'open') &&
+                frame.byteLength <= safeDcLimit;
+
+              if (canUseDc && job.dc) {
+                while (
+                  job.dc.bufferedAmount > 1024 * 1024 &&
+                  job.dc.readyState === 'open' &&
+                  !job.canceled
+                ) {
+                  await new Promise((r) => setTimeout(r, 15));
+                }
+                if (job.dc.readyState === 'open' && !job.canceled) {
+                  try {
+                    job.dc.send(frame);
+                    sentFrame = true;
+                    break;
+                  } catch {
+                    // Fall through to WebSocket relay cleanly
+                  }
+                }
               }
-              job.dc.send(frame);
-            } else if (wsRef.current?.readyState === WebSocket.OPEN) {
-              while (wsRef.current.bufferedAmount > 4 * 1024 * 1024) {
-                if (job.canceled) break;
-                await new Promise((r) => setTimeout(r, 15));
+
+              if (wsRef.current?.readyState === WebSocket.OPEN) {
+                while (
+                  wsRef.current.bufferedAmount > 1024 * 1024 &&
+                  wsRef.current.readyState === WebSocket.OPEN &&
+                  !job.canceled
+                ) {
+                  await new Promise((r) => setTimeout(r, 15));
+                }
+                if (wsRef.current.readyState === WebSocket.OPEN && !job.canceled) {
+                  wsRef.current.send(frame);
+                  sentFrame = true;
+                  break;
+                }
               }
-              wsRef.current.send(frame);
-            } else {
-              throw new Error('Connection lost during transfer.');
+
+              // Wait for WebSocket reconnect rather than aborting transfer
+              job.paused = true;
+              job.pausedByDisconnect = true;
+              setTransfers((prev) =>
+                prev.map((b) =>
+                  b.transferId === transferId
+                    ? {
+                        ...b,
+                        status: 'paused',
+                        errorMessage: 'Reconnecting to local network...',
+                      }
+                    : b
+                )
+              );
+              await new Promise<void>((resolve) => {
+                job.resumeResolver = resolve;
+              });
             }
+
+            if (job.canceled) break;
 
             fileEntry.nextChunkIndex = chunkIdx + 1;
             job.bytesSent += plainBytes.byteLength;
 
-            const elapsedSec = Math.max(0.15, (Date.now() - job.startedAt) / 1000);
-            const speedBps = job.bytesSent / elapsedSec;
-            const remaining = Math.max(0, job.totalSize - job.bytesSent);
-            const etaSeconds = speedBps > 0 ? remaining / speedBps : null;
+            const now = Date.now();
+            if (chunkIdx === manifest.totalChunks - 1 || now - job.lastUiUpdateAt >= 100) {
+              job.lastUiUpdateAt = now;
+              const elapsedSec = Math.max(0.15, (now - job.startedAt) / 1000);
+              const speedBps = job.bytesSent / elapsedSec;
+              const remaining = Math.max(0, job.totalSize - job.bytesSent);
+              const etaSeconds = speedBps > 0 ? remaining / speedBps : null;
 
-            setTransfers((prev) =>
-              prev.map((batch) => {
-                if (batch.transferId !== transferId) return batch;
-                return {
-                  ...batch,
-                  currentFileIndex: fileIdx,
-                  bytesTransferred: job.bytesSent,
-                  speedBps,
-                  etaSeconds,
-                  transportMode:
-                    job.dc && job.dc.readyState === 'open' ? 'p2p-webrtc' : 'e2e-relay',
-                  files: batch.files.map((f) =>
-                    f.fileId === manifest.fileId
-                      ? {
-                          ...f,
-                          bytesTransferred: Math.min(file.size, end),
-                          chunksTransferred: chunkIdx + 1,
-                        }
-                      : f
-                  ),
-                };
-              })
-            );
+              setTransfers((prev) =>
+                prev.map((batch) => {
+                  if (batch.transferId !== transferId) return batch;
+                  return {
+                    ...batch,
+                    status: 'transferring',
+                    errorMessage: undefined,
+                    currentFileIndex: fileIdx,
+                    bytesTransferred: job.bytesSent,
+                    speedBps,
+                    etaSeconds,
+                    transportMode:
+                      job.dc && job.dc.readyState === 'open' ? 'p2p-webrtc' : 'e2e-relay',
+                    files: batch.files.map((f) =>
+                      f.fileId === manifest.fileId
+                        ? {
+                            ...f,
+                            bytesTransferred: Math.min(file.size, end),
+                            chunksTransferred: chunkIdx + 1,
+                          }
+                        : f
+                    ),
+                  };
+                })
+              );
+            }
 
             // Sliding-window flow control every 16 chunks so receiver ACK paces large files
             if (chunkIdx - fileEntry.ackedChunkIndex >= 16) {
@@ -551,8 +802,25 @@ export function useInstropEngine() {
 
           if (job.canceled) break;
 
+          // Wait for WebRTC DataChannel buffer to drain before notifying file completion
+          if (job.dc && job.dc.readyState === 'open') {
+            const drainDeadline = Date.now() + 5000;
+            while (
+              job.dc.bufferedAmount > 0 &&
+              job.dc.readyState === 'open' &&
+              !job.canceled &&
+              Date.now() < drainDeadline
+            ) {
+              await new Promise((r) => setTimeout(r, 15));
+            }
+          }
+
           const shaHex = fileEntry.sha256.digestHex();
           fileEntry.computedSha256 = shaHex;
+
+          if (wsRef.current?.readyState !== WebSocket.OPEN && ensureConnectedRef.current) {
+            await ensureConnectedRef.current();
+          }
 
           sendWsJson({
             type: 'transfer:file-complete',
@@ -582,6 +850,10 @@ export function useInstropEngine() {
 
         const completedAt = Date.now();
         const avgSpeed = job.totalSize / Math.max(0.2, (completedAt - job.startedAt) / 1000);
+
+        if (wsRef.current?.readyState !== WebSocket.OPEN && ensureConnectedRef.current) {
+          await ensureConnectedRef.current();
+        }
 
         sendWsJson({
           type: 'transfer:batch-complete',
@@ -699,6 +971,9 @@ export function useInstropEngine() {
           chunks: [],
           bytesReceived: 0,
           chunksReceived: 0,
+          nextExpectedChunkIndex: 0,
+          outOfOrderBuffer: new Map(),
+          finalized: false,
         });
         fileOrder.push(item.fileId);
         activeFiles.push({
@@ -729,6 +1004,10 @@ export function useInstropEngine() {
         pc: null,
         dc: null,
         transportMode: 'e2e-relay',
+        processingQueue: Promise.resolve(),
+        batchCompleteReceived: false,
+        batchFinalized: false,
+        lastUiUpdateAt: 0,
       };
 
       receiverJobsRef.current.set(request.transferId, job);
@@ -806,11 +1085,25 @@ export function useInstropEngine() {
     async (msg: Record<string, unknown>) => {
       const type = String(msg.type || '');
 
+      if (type === 'pong') {
+        return;
+      }
+
       if (type === 'device:registered') {
         const dev = msg.device as PeerDevice;
         setSelfDevice(dev);
         setLanUrls(Array.isArray(msg.lanUrls) ? (msg.lanUrls as string[]) : []);
         setMdnsPeers(Array.isArray(msg.mdnsPeers) ? (msg.mdnsPeers as MdnsLanPeer[]) : []);
+
+        // Auto-resume any sender transfers paused solely by a brief network reconnect
+        for (const sJob of senderJobsRef.current.values()) {
+          if (sJob.pausedByDisconnect && !sJob.canceled) {
+            sJob.pausedByDisconnect = false;
+            sJob.paused = false;
+            sJob.resumeResolver?.();
+            sJob.resumeResolver = null;
+          }
+        }
 
         if (pendingPairFromUrlRef.current) {
           const code = pendingPairFromUrlRef.current;
@@ -1033,71 +1326,15 @@ export function useInstropEngine() {
         const fileState = job.files.get(fileId);
         if (!fileState) return;
 
-        const actualSha = fileState.sha256.digestHex();
-        const verified = actualSha === expectedSha;
-        fileState.expectedSha256 = expectedSha;
-        fileState.verified = verified;
-
-        const parts = fileState.chunks.map((c) => {
-          const copy = new Uint8Array(c.byteLength);
-          copy.set(c);
-          return copy.buffer;
+        // Enqueue behind any WebRTC/WS chunks still arriving or decrypting
+        job.processingQueue = job.processingQueue.then(async () => {
+          if (job.canceled || fileState.finalized) return;
+          fileState.expectedCompleteSha = expectedSha;
+          if (fileState.nextExpectedChunkIndex >= fileState.manifest.totalChunks) {
+            finalizeReceivedFile(job, fileState);
+            finalizeReceivedBatch(job);
+          }
         });
-        const blob = new Blob(parts, {
-          type: fileState.manifest.mimeType || 'application/octet-stream',
-        });
-        fileState.blob = blob;
-        const url = URL.createObjectURL(blob);
-        fileState.downloadUrl = url;
-        if (fileState.manifest.mimeType.startsWith('image/')) {
-          fileState.previewUrl = url;
-        }
-        // Release intermediate chunk references once Blob is materialized
-        fileState.chunks = [];
-
-        const shouldAutoSave =
-          verified && settingsRef.current.saveMode === 'auto' && !job.isFolder;
-
-        setTransfers((prev) =>
-          prev.map((batch) =>
-            batch.transferId === transferId
-              ? {
-                  ...batch,
-                  files: batch.files.map((f) =>
-                    f.fileId === fileId
-                      ? {
-                          ...f,
-                          sha256: actualSha,
-                          verified,
-                          downloadUrl: url,
-                          previewUrl: fileState.previewUrl,
-                          savedToDisk: false,
-                        }
-                      : f
-                  ),
-                }
-              : batch
-          )
-        );
-
-        if (shouldAutoSave) {
-          void triggerDownload(url, fileState.manifest.name, false, blob).then((res) => {
-            if (res.ok) {
-              setTransfers((prev) =>
-                prev.map((batch) =>
-                  batch.transferId === transferId
-                    ? {
-                        ...batch,
-                        files: batch.files.map((f) =>
-                          f.fileId === fileId ? { ...f, savedToDisk: true } : f
-                        ),
-                      }
-                    : batch
-                )
-              );
-            }
-          });
-        }
         return;
       }
 
@@ -1106,62 +1343,10 @@ export function useInstropEngine() {
         const job = receiverJobsRef.current.get(transferId);
         if (!job) return;
 
-        const completedAt = Date.now();
-        const avgSpeed = job.totalSize / Math.max(0.2, (completedAt - job.startedAt) / 1000);
-        const allVerified = job.fileOrder.every((id) => job.files.get(id)?.verified);
-
-        setTransfers((prev) =>
-          prev.map((b) =>
-            b.transferId === transferId
-              ? {
-                  ...b,
-                  status: allVerified ? 'completed' : 'failed',
-                  etaSeconds: 0,
-                  completedAt,
-                  errorMessage: allVerified ? undefined : 'Integrity verification mismatch (SHA-256).',
-                }
-              : b
-          )
-        );
-
-        appendHistory({
-          id: transferId,
-          direction: 'received',
-          peerId: job.peer.id,
-          peerName: job.peer.name,
-          peerOs: job.peer.os,
-          isFolder: job.isFolder,
-          folderName: job.folderName,
-          files: job.fileOrder.map((id) => {
-            const f = job.files.get(id)!;
-            return {
-              name: f.manifest.name,
-              relativePath: f.manifest.relativePath,
-              size: f.manifest.size,
-              mimeType: f.manifest.mimeType,
-              sha256: f.expectedSha256 || '',
-              verified: Boolean(f.verified),
-            };
-          }),
-          totalSize: job.totalSize,
-          status: allVerified ? 'completed' : 'failed',
-          startedAt: job.startedAt,
-          completedAt,
-          averageSpeedBps: avgSpeed,
-        });
-
-        if (allVerified && job.isFolder && settingsRef.current.saveMode === 'zip-folders') {
-          void downloadFolderAsZip(transferId);
-        }
-
-        fireBrowserNotification(
-          'Instrop — Files Received',
-          `Received ${job.fileOrder.length} item${job.fileOrder.length > 1 ? 's' : ''} from ${job.peer.name}`
-        );
-        pushToast({
-          title: allVerified ? 'Files received & verified' : 'Checksum mismatch',
-          detail: `${job.fileOrder.length} item${job.fileOrder.length > 1 ? 's' : ''} from ${job.peer.name}`,
-          tone: allVerified ? 'success' : 'error',
+        job.processingQueue = job.processingQueue.then(async () => {
+          if (job.canceled) return;
+          job.batchCompleteReceived = true;
+          finalizeReceivedBatch(job);
         });
         return;
       }
@@ -1210,7 +1395,14 @@ export function useInstropEngine() {
             };
             dc.onmessage = (mEv) => {
               if (mEv.data instanceof ArrayBuffer) {
-                void handleIncomingBinaryChunk(mEv.data);
+                handleIncomingBinaryChunk(mEv.data);
+              } else if (mEv.data instanceof Blob) {
+                void mEv.data.arrayBuffer().then(handleIncomingBinaryChunk);
+              } else if (ArrayBuffer.isView(mEv.data)) {
+                const view = mEv.data as ArrayBufferView;
+                const copy = new Uint8Array(view.byteLength);
+                copy.set(new Uint8Array(view.buffer, view.byteOffset, view.byteLength));
+                handleIncomingBinaryChunk(copy.buffer);
               }
             };
           };
@@ -1253,14 +1445,12 @@ export function useInstropEngine() {
     },
     [
       acceptIncomingRequest,
-      appendHistory,
-      downloadFolderAsZip,
-      fireBrowserNotification,
+      finalizeReceivedBatch,
+      finalizeReceivedFile,
       handleIncomingBinaryChunk,
       pushToast,
       runSenderLoop,
       sendWsJson,
-      triggerDownload,
       trustPeer,
     ]
   );
@@ -1309,8 +1499,21 @@ export function useInstropEngine() {
       if (unmounted) return;
       identityRef.current = identity;
 
+      let keepaliveTimer: number | null = null;
+      const openWaiters: Array<(ok: boolean) => void> = [];
+
+      const resolveOpenWaiters = (ok: boolean) => {
+        while (openWaiters.length > 0) {
+          openWaiters.shift()?.(ok);
+        }
+      };
+
       const connect = () => {
         if (unmounted) return;
+        const currentState = wsRef.current?.readyState;
+        if (currentState === WebSocket.OPEN || currentState === WebSocket.CONNECTING) {
+          return;
+        }
         setConnectionState(reconnectAttemptRef.current > 0 ? 'reconnecting' : 'connecting');
 
         let ws: WebSocket;
@@ -1318,6 +1521,7 @@ export function useInstropEngine() {
           ws = new WebSocket(resolveWsEndpoint());
         } catch {
           setConnectionState('offline');
+          resolveOpenWaiters(false);
           return;
         }
         ws.binaryType = 'arraybuffer';
@@ -1338,11 +1542,12 @@ export function useInstropEngine() {
               trustedIds: trustedRef.current.map((t) => t.id),
             })
           );
+          resolveOpenWaiters(true);
         };
 
         ws.onmessage = (ev) => {
           if (ev.data instanceof ArrayBuffer) {
-            void handleIncomingBinaryChunk(ev.data);
+            handleIncomingBinaryChunk(ev.data);
             return;
           }
           try {
@@ -1355,9 +1560,13 @@ export function useInstropEngine() {
 
         ws.onclose = () => {
           if (unmounted) return;
+          if (wsRef.current !== ws) return;
           setConnectionState('offline');
           for (const job of senderJobsRef.current.values()) {
-            if (!job.canceled) job.paused = true;
+            if (!job.canceled && !job.paused) {
+              job.paused = true;
+              job.pausedByDisconnect = true;
+            }
           }
           setTransfers((prev) =>
             prev.map((b) =>
@@ -1367,19 +1576,66 @@ export function useInstropEngine() {
             )
           );
 
-          const delay = Math.min(8000, 1000 * Math.pow(2, reconnectAttemptRef.current));
+          const delay = Math.min(5000, 600 * Math.pow(1.6, reconnectAttemptRef.current));
           reconnectAttemptRef.current += 1;
+          if (reconnectTimerRef.current !== null) {
+            clearTimeout(reconnectTimerRef.current);
+          }
           reconnectTimerRef.current = window.setTimeout(connect, delay);
         };
       };
 
+      ensureConnectedRef.current = async () => {
+        if (wsRef.current?.readyState === WebSocket.OPEN) return true;
+        if (reconnectTimerRef.current !== null) {
+          clearTimeout(reconnectTimerRef.current);
+          reconnectTimerRef.current = null;
+        }
+        reconnectAttemptRef.current = 0;
+        connect();
+        return await Promise.race([
+          new Promise<boolean>((resolve) => {
+            openWaiters.push(resolve);
+          }),
+          new Promise<boolean>((resolve) => setTimeout(() => resolve(false), 3500)),
+        ]);
+      };
+
+      const handleVisibility = () => {
+        if (document.visibilityState === 'visible' && wsRef.current?.readyState !== WebSocket.OPEN) {
+          if (reconnectTimerRef.current !== null) {
+            clearTimeout(reconnectTimerRef.current);
+            reconnectTimerRef.current = null;
+          }
+          reconnectAttemptRef.current = 0;
+          connect();
+        }
+      };
+
+      document.addEventListener('visibilitychange', handleVisibility);
+      keepaliveTimer = window.setInterval(() => {
+        if (wsRef.current?.readyState === WebSocket.OPEN) {
+          wsRef.current.send(JSON.stringify({ type: 'ping' }));
+        }
+      }, 15000);
+
       connect();
+
+      return () => {
+        document.removeEventListener('visibilitychange', handleVisibility);
+        if (keepaliveTimer !== null) clearInterval(keepaliveTimer);
+      };
     }
 
-    void boot();
+    let cleanupListeners: (() => void) | undefined;
+    void boot().then((cleanup) => {
+      cleanupListeners = cleanup;
+    });
 
     return () => {
       unmounted = true;
+      ensureConnectedRef.current = null;
+      cleanupListeners?.();
       if (reconnectTimerRef.current !== null) {
         clearTimeout(reconnectTimerRef.current);
       }
@@ -1395,13 +1651,19 @@ export function useInstropEngine() {
       folderName?: string
     ) => {
       if (!identityRef.current || selected.length === 0) return null;
-      if (wsRef.current?.readyState !== WebSocket.OPEN) {
-        pushToast({
-          title: 'Offline',
-          detail: 'Reconnect to local network before sending.',
-          tone: 'error',
-        });
-        return null;
+      const isWsOpen = () => wsRef.current?.readyState === WebSocket.OPEN;
+      if (!isWsOpen()) {
+        const reconnected = ensureConnectedRef.current
+          ? await ensureConnectedRef.current()
+          : false;
+        if (!reconnected || !isWsOpen()) {
+          pushToast({
+            title: 'Offline',
+            detail: 'Reconnect to local network before sending.',
+            tone: 'error',
+          });
+          return null;
+        }
       }
 
       const transferId = crypto.randomUUID ? crypto.randomUUID() : `tx-${Date.now()}`;
@@ -1445,12 +1707,14 @@ export function useInstropEngine() {
         bytesSent: 0,
         startedAt: Date.now(),
         paused: false,
+        pausedByDisconnect: false,
         canceled: false,
         resumeResolver: null,
         ackWaiter: null,
         dc: null,
         pc: null,
         transportMode: 'e2e-relay',
+        lastUiUpdateAt: 0,
       };
 
       // Initiate optional WebRTC P2P DataChannel in parallel

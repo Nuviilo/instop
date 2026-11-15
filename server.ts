@@ -197,9 +197,33 @@ export async function startInstropServer(options: StartServerOptions = {}): Prom
   });
 
   const server = createServer(app);
-  const wss = new WebSocketServer({ server, path: '/ws', maxPayload: 16 * 1024 * 1024 });
+  const wss = new WebSocketServer({
+    server,
+    path: '/ws',
+    maxPayload: 16 * 1024 * 1024,
+    perMessageDeflate: false,
+  });
+
+  const aliveSockets = new WeakMap<WebSocket, boolean>();
+  const heartbeatInterval = setInterval(() => {
+    for (const clientWs of wss.clients) {
+      if (aliveSockets.get(clientWs) === false) {
+        clientWs.terminate();
+        continue;
+      }
+      aliveSockets.set(clientWs, false);
+      if (clientWs.readyState === WebSocket.OPEN) {
+        clientWs.ping();
+      }
+    }
+  }, 20000);
 
   wss.on('connection', (ws, req) => {
+    aliveSockets.set(ws, true);
+    ws.on('pong', () => {
+      aliveSockets.set(ws, true);
+    });
+
     const forwarded = req.headers['x-forwarded-for'];
     const rawIp = Array.isArray(forwarded) ? forwarded[0] : forwarded || req.socket.remoteAddress;
     const ip = normalizeIp(rawIp);
@@ -242,6 +266,12 @@ export async function startInstropServer(options: StartServerOptions = {}): Prom
 
       const type = msg.type as string | undefined;
       if (!type) return;
+
+      aliveSockets.set(ws, true);
+      if (type === 'ping') {
+        sendJson(ws, { type: 'pong', ts: Date.now() });
+        return;
+      }
 
       if (type === 'device:register') {
         const deviceId = String(msg.id || '').trim();
@@ -426,6 +456,7 @@ export async function startInstropServer(options: StartServerOptions = {}): Prom
   return {
     port: boundPort,
     close: () => {
+      clearInterval(heartbeatInterval);
       wss.close();
       server.close();
     },
