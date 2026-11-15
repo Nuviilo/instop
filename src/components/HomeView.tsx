@@ -36,6 +36,7 @@ interface HomeViewProps {
   deviceType: DeviceType;
   pairingCode?: string;
   connectionState: ConnectionState;
+  connectionError?: string | null;
   lanUrls: string[];
   serverOrigin: string;
   onConnectToServer: (origin: string) => void;
@@ -62,6 +63,7 @@ export function HomeView({
   deviceType,
   pairingCode,
   connectionState,
+  connectionError,
   lanUrls,
   serverOrigin,
   onConnectToServer,
@@ -80,6 +82,10 @@ export function HomeView({
   const [editingName, setEditingName] = useState(false);
   const [draftName, setDraftName] = useState(deviceName);
   const [hostInput, setHostInput] = useState(serverOrigin);
+
+  React.useEffect(() => {
+    setHostInput(serverOrigin);
+  }, [serverOrigin]);
 
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const folderInputRef = useRef<HTMLInputElement | null>(null);
@@ -239,8 +245,10 @@ export function HomeView({
                   {connectionState === 'connected'
                     ? 'Ready on local network'
                     : connectionState === 'reconnecting'
-                      ? 'Reconnecting to local network'
-                      : 'Connecting to local network'}
+                      ? 'Reconnecting to local network...'
+                      : connectionState === 'offline'
+                        ? 'Not connected to PC server'
+                        : 'Connecting to local network...'}
                 </span>
               </span>
               {pairingCode && (
@@ -270,13 +278,14 @@ export function HomeView({
       </section>
 
       {connectionState !== 'connected' && (
-        <section className="rounded-2xl border border-amber-200 dark:border-amber-900/60 bg-amber-50/60 dark:bg-amber-950/20 p-4 sm:p-5 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+        <section className="rounded-2xl border border-amber-200 dark:border-amber-900/60 bg-amber-50/60 dark:bg-amber-950/20 p-4 sm:p-5 flex flex-col gap-3">
           <div className="min-w-0">
             <p className="text-sm font-medium text-zinc-950 dark:text-zinc-50">
               Connect to your Windows PC on Wi-Fi
             </p>
-            <p className="text-xs text-zinc-600 dark:text-zinc-400 mt-0.5">
-              Enter the PC IP shown on Instrop Windows (e.g. <span className="font-mono">192.168.1.15:3000</span>) or tap Pair to scan its QR code.
+            <p className="text-xs text-zinc-600 dark:text-zinc-400 mt-0.5 leading-relaxed">
+              {connectionError ||
+                'Enter the PC IP shown on Instrop Windows (e.g. 192.168.1.15:3000) or tap Scan QR.'}
             </p>
           </div>
           <form
@@ -284,7 +293,7 @@ export function HomeView({
               e.preventDefault();
               if (hostInput.trim()) onConnectToServer(hostInput.trim());
             }}
-            className="flex items-center gap-2 shrink-0"
+            className="flex flex-wrap items-center gap-2"
           >
             <input
               type="text"
@@ -292,13 +301,21 @@ export function HomeView({
               onChange={(e) => setHostInput(e.target.value)}
               placeholder="192.168.1.15:3000"
               aria-label="Windows PC IP address"
-              className="h-10 w-44 px-3 rounded-xl border border-zinc-300 dark:border-zinc-700 bg-white dark:bg-zinc-900 font-mono text-xs text-zinc-950 dark:text-zinc-50 focus:outline-none focus:ring-2 focus:ring-indigo-500"
+              className="h-10 flex-1 min-w-[160px] px-3 rounded-xl border border-zinc-300 dark:border-zinc-700 bg-white dark:bg-zinc-900 font-mono text-xs text-zinc-950 dark:text-zinc-50 focus:outline-none focus:ring-2 focus:ring-indigo-500"
             />
             <button
               type="submit"
               className="min-h-[40px] px-4 py-2 rounded-xl bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-medium transition-colors whitespace-nowrap"
             >
               Connect
+            </button>
+            <button
+              type="button"
+              onClick={onOpenPairing}
+              className="min-h-[40px] px-3.5 py-2 rounded-xl border border-zinc-300 dark:border-zinc-700 bg-white dark:bg-zinc-900 text-xs font-medium text-zinc-800 dark:text-zinc-200 hover:bg-zinc-50 dark:hover:bg-zinc-800 transition-colors whitespace-nowrap inline-flex items-center gap-1.5"
+            >
+              <QrCode className="w-3.5 h-3.5" />
+              Scan QR
             </button>
           </form>
         </section>

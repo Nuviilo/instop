@@ -195,6 +195,7 @@ export default function App() {
                   deviceType={engine.deviceType}
                   pairingCode={engine.selfDevice?.pairingCode}
                   connectionState={engine.connectionState}
+                  connectionError={engine.connectionError}
                   lanUrls={engine.lanUrls}
                   serverOrigin={engine.serverOrigin}
                   onConnectToServer={engine.connectToServer}

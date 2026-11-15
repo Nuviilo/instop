@@ -48,19 +48,52 @@ function computeNetworkGroup(ip: string): string {
   return `net-${ip}`;
 }
 
+function scoreLanInterface(name: string, address: string): number {
+  const lower = name.toLowerCase();
+  // Deprioritize virtual adapters (WSL, Hyper-V, Docker, VirtualBox, VMware, VPNs)
+  if (
+    /vethernet|wsl|hyper-v|virtualbox|vbox|vmware|docker|br-|virbr|tun|tap|tailscale|zerotier|hamachi|loopback/.test(
+      lower
+    )
+  ) {
+    return 100;
+  }
+  if (address.startsWith('192.168.56.') || address.startsWith('172.17.') || address.startsWith('172.18.')) {
+    return 90;
+  }
+  // Prefer Wi-Fi / WLAN / Hotspot and standard 192.168.x.x LANs first
+  if (/wi-fi|wifi|wlan|wireless|en0|eth/.test(lower) && address.startsWith('192.168.')) {
+    return 0;
+  }
+  if (/wi-fi|wifi|wlan|wireless/.test(lower)) {
+    return 5;
+  }
+  if (address.startsWith('192.168.')) {
+    return 10;
+  }
+  if (address.startsWith('10.')) {
+    return 20;
+  }
+  return 30;
+}
+
 function getLocalLanUrls(port: number): string[] {
   const interfaces = os.networkInterfaces();
-  const urls: string[] = [];
+  const candidates: Array<{ url: string; score: number }> = [];
   for (const name of Object.keys(interfaces)) {
     const list = interfaces[name];
     if (!list) continue;
     for (const iface of list) {
       if (iface.family === 'IPv4' && !iface.internal) {
-        urls.push(`http://${iface.address}:${port}`);
+        candidates.push({
+          url: `http://${iface.address}:${port}`,
+          score: scoreLanInterface(name, iface.address),
+        });
       }
     }
   }
-  return urls;
+  candidates.sort((a, b) => a.score - b.score);
+  return candidates.map((c) => c.url);
 }
 
 function addPairLink(idA: string, idB: string) {

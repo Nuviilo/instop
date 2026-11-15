@@ -42,6 +42,7 @@ import {
 } from '../utils/storage';
 import {
   dispatchPlatformNotification,
+  isNativeCapacitorApp,
   saveReceivedFileToDevice,
 } from '../utils/mobileBridge';
 
@@ -136,6 +137,7 @@ export function useInstropEngine() {
   const [history, setHistory] = useState<TransferHistoryEntry[]>(() => loadTransferHistory());
 
   const [connectionState, setConnectionState] = useState<ConnectionState>('connecting');
+  const [connectionError, setConnectionError] = useState<string | null>(null);
   const [selfDevice, setSelfDevice] = useState<PeerDevice | null>(null);
   const [nearbyPeers, setNearbyPeers] = useState<PeerDevice[]>([]);
   const [mdnsPeers, setMdnsPeers] = useState<MdnsLanPeer[]>([]);
@@ -1500,6 +1502,7 @@ export function useInstropEngine() {
       identityRef.current = identity;
 
       let keepaliveTimer: number | null = null;
+      let connectTimeoutTimer: number | null = null;
       const openWaiters: Array<(ok: boolean) => void> = [];
 
       const resolveOpenWaiters = (ok: boolean) => {
@@ -1508,28 +1511,60 @@ export function useInstropEngine() {
         }
       };
 
+      const clearConnectTimeout = () => {
+        if (connectTimeoutTimer !== null) {
+          clearTimeout(connectTimeoutTimer);
+          connectTimeoutTimer = null;
+        }
+      };
+
       const connect = () => {
         if (unmounted) return;
+
+        // Inside Android/iOS Capacitor APK, localhost has no backend server; wait for PC IP/QR
+        if (isNativeCapacitorApp() && !serverOrigin.trim()) {
+          setConnectionState('offline');
+          setConnectionError(
+            'Enter your Windows PC IP (e.g. 192.168.1.15:3000) or tap Pair to scan its QR code.'
+          );
+          resolveOpenWaiters(false);
+          return;
+        }
+
         const currentState = wsRef.current?.readyState;
         if (currentState === WebSocket.OPEN || currentState === WebSocket.CONNECTING) {
           return;
         }
         setConnectionState(reconnectAttemptRef.current > 0 ? 'reconnecting' : 'connecting');
 
+        const wsEndpoint = resolveWsEndpoint();
         let ws: WebSocket;
         try {
-          ws = new WebSocket(resolveWsEndpoint());
+          ws = new WebSocket(wsEndpoint);
         } catch {
           setConnectionState('offline');
+          setConnectionError(`Invalid server address: ${wsEndpoint}`);
           resolveOpenWaiters(false);
           return;
         }
         ws.binaryType = 'arraybuffer';
         wsRef.current = ws;
 
+        clearConnectTimeout();
+        connectTimeoutTimer = window.setTimeout(() => {
+          if (!unmounted && wsRef.current === ws && ws.readyState === WebSocket.CONNECTING) {
+            setConnectionError(
+              `Timed out reaching ${wsEndpoint.replace(/^wss?:\/\//, '').replace(/\/ws$/, '')}. Check same Wi-Fi & allow Windows Firewall.`
+            );
+            ws.close();
+          }
+        }, 6000);
+
         ws.onopen = () => {
+          clearConnectTimeout();
           reconnectAttemptRef.current = 0;
           setConnectionState('connected');
+          setConnectionError(null);
           ws.send(
             JSON.stringify({
               type: 'device:register',
@@ -1559,9 +1594,15 @@ export function useInstropEngine() {
         };
 
         ws.onclose = () => {
+          clearConnectTimeout();
           if (unmounted) return;
           if (wsRef.current !== ws) return;
           setConnectionState('offline');
+          if (serverOrigin.trim()) {
+            setConnectionError(
+              `Cannot reach ${serverOrigin.trim()}. Verify Instrop is open on your PC, both devices share the same Wi-Fi, and Firewall allows port 3000.`
+            );
+          }
           for (const job of senderJobsRef.current.values()) {
             if (!job.canceled && !job.paused) {
               job.paused = true;
@@ -1576,7 +1617,7 @@ export function useInstropEngine() {
             )
           );
 
-          const delay = Math.min(5000, 600 * Math.pow(1.6, reconnectAttemptRef.current));
+          const delay = Math.min(5000, 800 * Math.pow(1.6, reconnectAttemptRef.current));
           reconnectAttemptRef.current += 1;
           if (reconnectTimerRef.current !== null) {
             clearTimeout(reconnectTimerRef.current);
@@ -1587,6 +1628,7 @@ export function useInstropEngine() {
 
       ensureConnectedRef.current = async () => {
         if (wsRef.current?.readyState === WebSocket.OPEN) return true;
+        if (isNativeCapacitorApp() && !serverOrigin.trim()) return false;
         if (reconnectTimerRef.current !== null) {
           clearTimeout(reconnectTimerRef.current);
           reconnectTimerRef.current = null;
@@ -1603,6 +1645,7 @@ export function useInstropEngine() {
 
       const handleVisibility = () => {
         if (document.visibilityState === 'visible' && wsRef.current?.readyState !== WebSocket.OPEN) {
+          if (isNativeCapacitorApp() && !serverOrigin.trim()) return;
           if (reconnectTimerRef.current !== null) {
             clearTimeout(reconnectTimerRef.current);
             reconnectTimerRef.current = null;
@@ -1622,6 +1665,7 @@ export function useInstropEngine() {
       connect();
 
       return () => {
+        clearConnectTimeout();
         document.removeEventListener('visibilitychange', handleVisibility);
         if (keepaliveTimer !== null) clearInterval(keepaliveTimer);
       };
@@ -1951,6 +1995,7 @@ export function useInstropEngine() {
     deviceType,
     selfDevice,
     connectionState,
+    connectionError,
     serverOrigin,
     connectToServer,
     nearbyPeers,
