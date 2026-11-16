@@ -193,12 +193,15 @@ export default function App() {
                   deviceName={engine.settings.deviceName}
                   deviceOs={engine.deviceOs}
                   deviceType={engine.deviceType}
-                  pairingCode={engine.selfDevice?.pairingCode}
+                  pairingCode={engine.pairingCode}
                   connectionState={engine.connectionState}
                   connectionError={engine.connectionError}
                   lanUrls={engine.lanUrls}
                   serverOrigin={engine.serverOrigin}
                   onConnectToServer={engine.connectToServer}
+                  scanningLan={engine.scanningLan}
+                  discoveredServerUrls={engine.discoveredServerUrls}
+                  onScanForPc={() => void engine.scanForPcServers(true)}
                   nearbyPeers={engine.nearbyPeers}
                   trustedDevices={engine.trustedDevices}
                   selectedPeerId={selectedPeerId}
@@ -315,6 +318,7 @@ export default function App() {
         open={pairingOpen}
         onClose={() => setPairingOpen(false)}
         selfDevice={engine.selfDevice}
+        pairingCode={engine.pairingCode}
         lanUrls={engine.lanUrls}
         serverOrigin={engine.serverOrigin}
         isConnected={engine.connectionState === 'connected'}

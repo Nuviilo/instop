@@ -8,6 +8,7 @@ import {
   FolderUp,
   QrCode,
   Radio,
+  Search,
   ShieldCheck,
   Wifi,
   WifiOff,
@@ -40,6 +41,9 @@ interface HomeViewProps {
   lanUrls: string[];
   serverOrigin: string;
   onConnectToServer: (origin: string) => void;
+  scanningLan?: boolean;
+  discoveredServerUrls?: string[];
+  onScanForPc?: () => void;
   nearbyPeers: PeerDevice[];
   trustedDevices: TrustedDeviceRecord[];
   selectedPeerId: string | null;
@@ -67,6 +71,9 @@ export function HomeView({
   lanUrls,
   serverOrigin,
   onConnectToServer,
+  scanningLan,
+  discoveredServerUrls = [],
+  onScanForPc,
   nearbyPeers,
   trustedDevices,
   selectedPeerId,
@@ -285,9 +292,26 @@ export function HomeView({
             </p>
             <p className="text-xs text-zinc-600 dark:text-zinc-400 mt-0.5 leading-relaxed">
               {connectionError ||
-                'Enter the PC IP shown on Instrop Windows (e.g. 192.168.1.15:3000) or tap Scan QR.'}
+                'Enter the PC IP shown on Instrop Windows (e.g. 192.168.1.15:3000), tap Find PC on Wi-Fi, or tap Scan QR.'}
             </p>
           </div>
+          {discoveredServerUrls.length > 0 && (
+            <div className="flex flex-wrap items-center gap-2">
+              <span className="text-[11px] font-medium text-emerald-700 dark:text-emerald-400">
+                Found on Wi-Fi:
+              </span>
+              {discoveredServerUrls.map((url) => (
+                <button
+                  key={url}
+                  type="button"
+                  onClick={() => onConnectToServer(url)}
+                  className="min-h-[34px] px-3 py-1 rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white font-mono text-xs font-medium transition-colors"
+                >
+                  {url.replace(/^https?:\/\//, '')}
+                </button>
+              ))}
+            </div>
+          )}
           <form
             onSubmit={(e) => {
               e.preventDefault();
@@ -309,6 +333,17 @@ export function HomeView({
             >
               Connect
             </button>
+            {onScanForPc && (
+              <button
+                type="button"
+                disabled={scanningLan}
+                onClick={onScanForPc}
+                className="min-h-[40px] px-3.5 py-2 rounded-xl border border-zinc-300 dark:border-zinc-700 bg-white dark:bg-zinc-900 text-xs font-medium text-zinc-800 dark:text-zinc-200 hover:bg-zinc-50 dark:hover:bg-zinc-800 disabled:opacity-50 transition-colors whitespace-nowrap inline-flex items-center gap-1.5"
+              >
+                <Search className={`w-3.5 h-3.5 ${scanningLan ? 'animate-pulse text-indigo-500' : ''}`} />
+                {scanningLan ? 'Scanning Wi-Fi...' : 'Find PC on Wi-Fi'}
+              </button>
+            )}
             <button
               type="button"
               onClick={onOpenPairing}

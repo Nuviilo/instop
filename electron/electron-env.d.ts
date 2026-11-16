@@ -1,4 +1,12 @@
 declare module 'electron' {
+  export interface NativeImage {
+    isEmpty(): boolean;
+  }
+
+  export const nativeImage: {
+    createFromPath(path: string): NativeImage;
+  };
+
   export interface BrowserWindowConstructorOptions {
     width?: number;
     height?: number;
@@ -7,7 +15,7 @@ declare module 'electron' {
     autoHideMenuBar?: boolean;
     title?: string;
     backgroundColor?: string;
-    icon?: string;
+    icon?: string | NativeImage;
     show?: boolean;
     webPreferences?: {
       contextIsolation?: boolean;
@@ -23,6 +31,7 @@ declare module 'electron' {
     restore(): void;
     focus(): void;
     show(): void;
+    setIcon(icon: NativeImage | string): void;
     loadURL(url: string): Promise<void>;
     on(event: string, listener: (...args: unknown[]) => void): this;
     once(event: string, listener: (...args: unknown[]) => void): this;

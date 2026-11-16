@@ -3,11 +3,13 @@ import QRCode from 'qrcode';
 import jsQR from 'jsqr';
 import { Camera, Check, Copy, QrCode, X } from 'lucide-react';
 import type { PeerDevice } from '../types/instrop';
+import { isMobileLocalhostShell } from '../utils/mobileBridge';
 
 interface PairingModalProps {
   open: boolean;
   onClose: () => void;
   selfDevice: PeerDevice | null;
+  pairingCode: string;
   lanUrls: string[];
   serverOrigin: string;
   isConnected: boolean;
@@ -19,6 +21,7 @@ export function PairingModal({
   open,
   onClose,
   selfDevice,
+  pairingCode,
   lanUrls,
   serverOrigin,
   isConnected,
@@ -27,6 +30,7 @@ export function PairingModal({
 }: PairingModalProps) {
   const [tab, setTab] = useState<'my-code' | 'enter-code' | 'scan-qr'>('my-code');
   const [qrDataUrl, setQrDataUrl] = useState<string>('');
+  const [selectedLanUrl, setSelectedLanUrl] = useState<string>('');
   const [manualCode, setManualCode] = useState<string>('');
   const [manualHost, setManualHost] = useState<string>(serverOrigin);
   const [copied, setCopied] = useState(false);
@@ -40,13 +44,26 @@ export function PairingModal({
   const rafRef = useRef<number | null>(null);
   const qrFileInputRef = useRef<HTMLInputElement | null>(null);
 
-  const preferredOrigin = lanUrls[0] || window.location.origin;
-  const pairUrl = selfDevice
-    ? `${preferredOrigin}/?pair=${selfDevice.pairingCode}`
-    : preferredOrigin;
+  const activeCode = selfDevice?.pairingCode || pairingCode;
+  const preferredOrigin =
+    (selectedLanUrl && lanUrls.includes(selectedLanUrl) ? selectedLanUrl : '') ||
+    lanUrls[0] ||
+    serverOrigin ||
+    window.location.origin;
+  const pairUrl = activeCode ? `${preferredOrigin}/?pair=${activeCode}` : preferredOrigin;
 
   useEffect(() => {
-    if (!open || !selfDevice) return;
+    if (!open) return;
+    setManualHost(serverOrigin);
+    if (!isConnected && isMobileLocalhostShell()) {
+      setTab('scan-qr');
+    } else {
+      setTab('my-code');
+    }
+  }, [open, isConnected, serverOrigin]);
+
+  useEffect(() => {
+    if (!open || !activeCode) return;
     let active = true;
     QRCode.toDataURL(pairUrl, {
       width: 240,
@@ -66,7 +83,7 @@ export function PairingModal({
     return () => {
       active = false;
     };
-  }, [open, selfDevice, pairUrl]);
+  }, [open, activeCode, pairUrl]);
 
   const handleDecodedQrString = React.useCallback(
     (rawInput: string): boolean => {
@@ -76,7 +93,7 @@ export function PairingModal({
         const parsed = new URL(raw);
         const pairParam = parsed.searchParams.get('pair');
         const currentEffective = serverOrigin || window.location.origin;
-        if (parsed.origin && parsed.origin !== currentEffective) {
+        if (parsed.origin && (!isConnected || parsed.origin !== currentEffective)) {
           onConnectToServer(parsed.origin, pairParam || undefined);
           onClose();
           return true;
@@ -87,7 +104,13 @@ export function PairingModal({
           return true;
         }
       } catch {
-        // Not a full URL; fall through to raw 6-digit code extraction
+        // Not a full URL; fall through to raw IP or 6-digit code extraction
+      }
+      const hostMatch = raw.match(/^(?:https?:\/\/)?(\d{1,3}(?:\.\d{1,3}){3}(?::\d+)?)$/);
+      if (hostMatch?.[1]) {
+        onConnectToServer(`http://${hostMatch[1]}`);
+        onClose();
+        return true;
       }
       const match = raw.match(/pair=(\d{6})/) || raw.match(/\b(\d{6})\b/);
       if (match?.[1]) {
@@ -97,7 +120,7 @@ export function PairingModal({
       }
       return false;
     },
-    [onClose, onConnectToServer, onPairByCode, serverOrigin]
+    [isConnected, onClose, onConnectToServer, onPairByCode, serverOrigin]
   );
 
   // Camera QR Scanner lifecycle
@@ -217,8 +240,8 @@ export function PairingModal({
   if (!open) return null;
 
   const handleCopyCode = async () => {
-    if (!selfDevice?.pairingCode) return;
-    await navigator.clipboard.writeText(selfDevice.pairingCode);
+    if (!activeCode) return;
+    await navigator.clipboard.writeText(activeCode);
     setCopied(true);
     window.setTimeout(() => setCopied(false), 1800);
   };
@@ -233,7 +256,7 @@ export function PairingModal({
     e.preventDefault();
     const cleaned = manualCode.replace(/\D/g, '');
     const host = manualHost.trim();
-    if (host && host !== serverOrigin) {
+    if (host && (!isConnected || host !== serverOrigin)) {
       onConnectToServer(host, cleaned.length === 6 ? cleaned : undefined);
       setManualCode('');
       onClose();
@@ -309,6 +332,22 @@ export function PairingModal({
         <div className="p-6">
           {tab === 'my-code' && (
             <div className="flex flex-col items-center text-center">
+              {!isConnected && (
+                <div className="mb-4 w-full rounded-xl border border-amber-200 dark:border-amber-900/60 bg-amber-50/70 dark:bg-amber-950/20 px-3.5 py-2.5 text-left">
+                  <p className="text-xs text-amber-800 dark:text-amber-300 leading-relaxed">
+                    Not connected to your Windows PC server yet. Switch to{' '}
+                    <button
+                      type="button"
+                      onClick={() => setTab('scan-qr')}
+                      className="font-semibold underline underline-offset-2"
+                    >
+                      Scan QR
+                    </button>{' '}
+                    to scan your PC&apos;s QR code first.
+                  </p>
+                </div>
+              )}
+
               <div className="p-3 bg-white rounded-2xl border border-zinc-200 dark:border-zinc-700">
                 {qrDataUrl ? (
                   <img
@@ -330,7 +369,7 @@ export function PairingModal({
                 </p>
                 <div className="flex items-center justify-center gap-3">
                   <span className="font-mono text-2xl font-semibold tracking-[0.22em] text-zinc-950 dark:text-zinc-50 tabular-nums">
-                    {selfDevice?.pairingCode || '------'}
+                    {activeCode || '------'}
                   </span>
                   <button
                     type="button"
@@ -342,6 +381,33 @@ export function PairingModal({
                   </button>
                 </div>
               </div>
+
+              {lanUrls.length > 1 && (
+                <div className="mt-4 w-full text-left">
+                  <p className="text-[11px] text-zinc-500 dark:text-zinc-400 mb-1.5">
+                    Multiple PC network adapters detected — choose your Wi-Fi IP:
+                  </p>
+                  <div className="flex flex-wrap gap-1.5">
+                    {lanUrls.map((url) => {
+                      const active = url === preferredOrigin;
+                      return (
+                        <button
+                          key={url}
+                          type="button"
+                          onClick={() => setSelectedLanUrl(url)}
+                          className={`px-2.5 py-1 rounded-lg border font-mono text-[11px] transition-colors ${
+                            active
+                              ? 'border-indigo-500 bg-indigo-50 dark:bg-indigo-950/40 text-indigo-700 dark:text-indigo-300'
+                              : 'border-zinc-200 dark:border-zinc-800 text-zinc-600 dark:text-zinc-400 hover:bg-zinc-50 dark:hover:bg-zinc-900'
+                          }`}
+                        >
+                          {url.replace(/^https?:\/\//, '')}
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+              )}
 
               <div className="mt-4 w-full pt-4 border-t border-zinc-200/80 dark:border-zinc-800/80 flex items-center justify-between gap-2 text-left">
                 <div className="min-w-0">

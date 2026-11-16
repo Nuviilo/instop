@@ -1,0 +1,12 @@
+{
+  "appId": "com.instrop.app",
+  "appName": "Instrop",
+  "webDir": "dist",
+  "server": {
+    "androidScheme": "http",
+    "cleartext": true
+  },
+  "android": {
+    "allowMixedContent": true
+  }
+}

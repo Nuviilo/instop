@@ -1,4 +1,4 @@
-import { app, BrowserWindow, session, shell } from 'electron';
+import { app, BrowserWindow, nativeImage, session, shell } from 'electron';
 import fs from 'node:fs';
 import path from 'node:path';
 import { startInstropServer } from '../server.ts';
@@ -8,6 +8,29 @@ let serverHandle: { port: number; close: () => void } | null = null;
 
 function resolveAppPath(...segments: string[]): string {
   return path.resolve(__dirname, '..', ...segments);
+}
+
+function resolveAppIcon() {
+  const resourcesPath = (process as NodeJS.Process & { resourcesPath?: string }).resourcesPath || '';
+  const candidates = [
+    resolveAppPath('build', 'icon.ico'),
+    resolveAppPath('build', 'icon.png'),
+    resolveAppPath('dist', 'instrop-icon.png'),
+    resolveAppPath('public', 'instrop-icon.png'),
+    path.join(resourcesPath, 'build', 'icon.ico'),
+    path.join(resourcesPath, 'app.asar', 'build', 'icon.ico'),
+  ];
+
+  for (const candidate of candidates) {
+    if (candidate && fs.existsSync(candidate)) {
+      const img = nativeImage.createFromPath(candidate);
+      if (!img.isEmpty()) {
+        return img;
+      }
+      return candidate;
+    }
+  }
+  return undefined;
 }
 
 async function bootServer(): Promise<{ port: number; close: () => void }> {
@@ -32,8 +55,7 @@ async function bootServer(): Promise<{ port: number; close: () => void }> {
 }
 
 function createMainWindow(port: number) {
-  const icoPath = resolveAppPath('build', 'icon.ico');
-  const icon = fs.existsSync(icoPath) ? icoPath : undefined;
+  const icon = resolveAppIcon();
 
   const win = new BrowserWindow({
     width: 1180,
@@ -42,7 +64,7 @@ function createMainWindow(port: number) {
     minHeight: 600,
     autoHideMenuBar: true,
     title: 'Instrop',
-    backgroundColor: '#f8fafc',
+    backgroundColor: '#09090B',
     show: false,
     icon,
     webPreferences: {
@@ -51,6 +73,10 @@ function createMainWindow(port: number) {
       sandbox: true,
     },
   });
+
+  if (icon && typeof win.setIcon === 'function' && typeof icon !== 'string') {
+    win.setIcon(icon);
+  }
 
   win.once('ready-to-show', () => {
     win.show();

@@ -41,8 +41,9 @@ import {
   saveTrustedDevices,
 } from '../utils/storage';
 import {
+  discoverLanInstropServers,
   dispatchPlatformNotification,
-  isNativeCapacitorApp,
+  isMobileLocalhostShell,
   saveReceivedFileToDevice,
 } from '../utils/mobileBridge';
 
@@ -138,6 +139,9 @@ export function useInstropEngine() {
 
   const [connectionState, setConnectionState] = useState<ConnectionState>('connecting');
   const [connectionError, setConnectionError] = useState<string | null>(null);
+  const [localPairingCode] = useState<string>(() =>
+    String(Math.floor(100000 + Math.random() * 900000))
+  );
   const [selfDevice, setSelfDevice] = useState<PeerDevice | null>(null);
   const [nearbyPeers, setNearbyPeers] = useState<PeerDevice[]>([]);
   const [mdnsPeers, setMdnsPeers] = useState<MdnsLanPeer[]>([]);
@@ -146,6 +150,9 @@ export function useInstropEngine() {
   const [transfers, setTransfers] = useState<ActiveTransferBatch[]>([]);
   const [toasts, setToasts] = useState<ToastNotice[]>([]);
   const [serverOrigin, setServerOriginState] = useState<string>(() => loadServerOrigin());
+  const [connectNonce, setConnectNonce] = useState<number>(0);
+  const [scanningLan, setScanningLan] = useState<boolean>(false);
+  const [discoveredServerUrls, setDiscoveredServerUrls] = useState<string[]>([]);
 
   const wsRef = useRef<WebSocket | null>(null);
   const identityRef = useRef<DeviceKeyIdentity | null>(null);
@@ -155,6 +162,8 @@ export function useInstropEngine() {
   const senderJobsRef = useRef<Map<string, SenderJob>>(new Map());
   const receiverJobsRef = useRef<Map<string, ReceiverJob>>(new Map());
   const reconnectAttemptRef = useRef<number>(0);
+  const everConnectedToCurrentOriginRef = useRef<boolean>(false);
+  const autoScanRanRef = useRef<boolean>(false);
   const reconnectTimerRef = useRef<number | null>(null);
   const pendingPairFromUrlRef = useRef<string | null>(null);
   const ensureConnectedRef = useRef<(() => Promise<boolean>) | null>(null);
@@ -1457,7 +1466,47 @@ export function useInstropEngine() {
     ]
   );
 
-  // Boot device identity + WebSocket connection (re-runs if serverOrigin changes)
+  const connectToServer = useCallback((origin: string, optionalPairCode?: string) => {
+    let cleaned = origin.trim().replace(/\/+$/, '');
+    if (cleaned && !/^https?:\/\//i.test(cleaned) && !/^wss?:\/\//i.test(cleaned)) {
+      const hasPort = /:\d+$/.test(cleaned);
+      cleaned = `http://${hasPort ? cleaned : `${cleaned}:3000`}`;
+    }
+    if (optionalPairCode && /^\d{6}$/.test(optionalPairCode)) {
+      pendingPairFromUrlRef.current = optionalPairCode;
+    }
+    reconnectAttemptRef.current = 0;
+    everConnectedToCurrentOriginRef.current = false;
+    saveServerOrigin(cleaned);
+    setConnectionError(null);
+    setNearbyPeers([]);
+    setSelfDevice(null);
+    setServerOriginState(cleaned);
+    setConnectNonce((n) => n + 1);
+  }, []);
+
+  const scanForPcServers = useCallback(async (autoConnectSingle = false) => {
+    setScanningLan(true);
+    try {
+      const res = await discoverLanInstropServers();
+      if (res.mixedContentBlocked) {
+        setConnectionState('offline');
+        setConnectionError(
+          'This APK is running on https://localhost, which blocks local ws:// PC connections. Add capacitor.config.json (androidScheme: "http") and rebuild the APK.'
+        );
+        return [];
+      }
+      setDiscoveredServerUrls(res.servers);
+      if (autoConnectSingle && res.servers.length === 1 && !serverOrigin.trim()) {
+        connectToServer(res.servers[0]);
+      }
+      return res.servers;
+    } finally {
+      setScanningLan(false);
+    }
+  }, [connectToServer, serverOrigin]);
+
+  // Boot device identity + WebSocket connection (re-runs if serverOrigin or connectNonce changes)
   useEffect(() => {
     let unmounted = false;
 
@@ -1497,7 +1546,19 @@ export function useInstropEngine() {
       const loaded = loadSettings(profile.defaultName);
       setSettingsState(loaded);
 
-      const identity = identityRef.current || (await generateDeviceKeyIdentity());
+      let identity = identityRef.current;
+      if (!identity) {
+        try {
+          identity = await generateDeviceKeyIdentity();
+        } catch {
+          if (unmounted) return;
+          setConnectionState('offline');
+          setConnectionError(
+            'WebCrypto encryption requires the Android APK, Windows desktop app, or https:// / localhost. Plain http:// tabs in mobile browsers disable WebCrypto.'
+          );
+          return;
+        }
+      }
       if (unmounted) return;
       identityRef.current = identity;
 
@@ -1521,11 +1582,25 @@ export function useInstropEngine() {
       const connect = () => {
         if (unmounted) return;
 
-        // Inside Android/iOS Capacitor APK, localhost has no backend server; wait for PC IP/QR
-        if (isNativeCapacitorApp() && !serverOrigin.trim()) {
+        // Inside Android/iOS Capacitor APK, localhost has no backend server; wait for PC IP/QR or auto-discovery
+        if (isMobileLocalhostShell() && !serverOrigin.trim()) {
           setConnectionState('offline');
           setConnectionError(
-            'Enter your Windows PC IP (e.g. 192.168.1.15:3000) or tap Pair to scan its QR code.'
+            'No Windows PC connected yet. Tap "Find PC on Wi-Fi", scan the PC QR code, or enter the PC IP.'
+          );
+          resolveOpenWaiters(false);
+          if (!autoScanRanRef.current) {
+            autoScanRanRef.current = true;
+            void scanForPcServers(true);
+          }
+          return;
+        }
+
+        const wsEndpoint = resolveWsEndpoint();
+        if (window.location.protocol === 'https:' && wsEndpoint.startsWith('ws://')) {
+          setConnectionState('offline');
+          setConnectionError(
+            'Android WebView blocked insecure ws:// from https://localhost. Sync capacitor.config.json (androidScheme: "http") and rebuild the APK.'
           );
           resolveOpenWaiters(false);
           return;
@@ -1537,13 +1612,17 @@ export function useInstropEngine() {
         }
         setConnectionState(reconnectAttemptRef.current > 0 ? 'reconnecting' : 'connecting');
 
-        const wsEndpoint = resolveWsEndpoint();
         let ws: WebSocket;
         try {
           ws = new WebSocket(wsEndpoint);
-        } catch {
+        } catch (err) {
           setConnectionState('offline');
-          setConnectionError(`Invalid server address: ${wsEndpoint}`);
+          const msg = err instanceof Error ? err.message : '';
+          setConnectionError(
+            msg.toLowerCase().includes('insecure') || msg.toLowerCase().includes('mixed')
+              ? 'Mixed Content blocked ws:// from https://localhost. Add capacitor.config.json (androidScheme: "http") and rebuild the APK.'
+              : `Invalid server address: ${wsEndpoint}`
+          );
           resolveOpenWaiters(false);
           return;
         }
@@ -1554,15 +1633,16 @@ export function useInstropEngine() {
         connectTimeoutTimer = window.setTimeout(() => {
           if (!unmounted && wsRef.current === ws && ws.readyState === WebSocket.CONNECTING) {
             setConnectionError(
-              `Timed out reaching ${wsEndpoint.replace(/^wss?:\/\//, '').replace(/\/ws$/, '')}. Check same Wi-Fi & allow Windows Firewall.`
+              `Timed out reaching ${wsEndpoint.replace(/^wss?:\/\//, '').replace(/\/ws$/, '')}. Check same Wi-Fi, allow port 3000 in Windows Firewall, or tap "Find PC on Wi-Fi".`
             );
             ws.close();
           }
-        }, 6000);
+        }, 4500);
 
         ws.onopen = () => {
           clearConnectTimeout();
           reconnectAttemptRef.current = 0;
+          everConnectedToCurrentOriginRef.current = true;
           setConnectionState('connected');
           setConnectionError(null);
           ws.send(
@@ -1572,6 +1652,7 @@ export function useInstropEngine() {
               name: settingsRef.current.deviceName,
               os: profile.os,
               deviceType: profile.deviceType,
+              preferredPairingCode: localPairingCode,
               publicKeyJwk: identity.publicKeyJwk,
               fingerprint: identity.fingerprint,
               trustedIds: trustedRef.current.map((t) => t.id),
@@ -1597,10 +1678,11 @@ export function useInstropEngine() {
           clearConnectTimeout();
           if (unmounted) return;
           if (wsRef.current !== ws) return;
+          wsRef.current = null;
           setConnectionState('offline');
           if (serverOrigin.trim()) {
             setConnectionError(
-              `Cannot reach ${serverOrigin.trim()}. Verify Instrop is open on your PC, both devices share the same Wi-Fi, and Firewall allows port 3000.`
+              `Cannot reach ${serverOrigin.trim()}. Verify Instrop is open on your PC, both share the same Wi-Fi, and Windows Firewall allows port 3000.`
             );
           }
           for (const job of senderJobsRef.current.values()) {
@@ -1617,7 +1699,15 @@ export function useInstropEngine() {
             )
           );
 
-          const delay = Math.min(5000, 800 * Math.pow(1.6, reconnectAttemptRef.current));
+          // Stop endless connecting/reconnecting flicker if a manual PC IP fails repeatedly before ever connecting
+          const maxRetriesBeforeStop =
+            serverOrigin.trim() && !everConnectedToCurrentOriginRef.current ? 1 : 999;
+          if (reconnectAttemptRef.current >= maxRetriesBeforeStop) {
+            resolveOpenWaiters(false);
+            return;
+          }
+
+          const delay = Math.min(5000, 900 * Math.pow(1.6, reconnectAttemptRef.current));
           reconnectAttemptRef.current += 1;
           if (reconnectTimerRef.current !== null) {
             clearTimeout(reconnectTimerRef.current);
@@ -1628,7 +1718,7 @@ export function useInstropEngine() {
 
       ensureConnectedRef.current = async () => {
         if (wsRef.current?.readyState === WebSocket.OPEN) return true;
-        if (isNativeCapacitorApp() && !serverOrigin.trim()) return false;
+        if (isMobileLocalhostShell() && !serverOrigin.trim()) return false;
         if (reconnectTimerRef.current !== null) {
           clearTimeout(reconnectTimerRef.current);
           reconnectTimerRef.current = null;
@@ -1645,7 +1735,7 @@ export function useInstropEngine() {
 
       const handleVisibility = () => {
         if (document.visibilityState === 'visible' && wsRef.current?.readyState !== WebSocket.OPEN) {
-          if (isNativeCapacitorApp() && !serverOrigin.trim()) return;
+          if (isMobileLocalhostShell() && !serverOrigin.trim()) return;
           if (reconnectTimerRef.current !== null) {
             clearTimeout(reconnectTimerRef.current);
             reconnectTimerRef.current = null;
@@ -1684,8 +1774,17 @@ export function useInstropEngine() {
         clearTimeout(reconnectTimerRef.current);
       }
       wsRef.current?.close();
+      wsRef.current = null;
     };
-  }, [deviceId, serverOrigin, handleIncomingBinaryChunk, handleWsJsonMessage]);
+  }, [
+    deviceId,
+    serverOrigin,
+    connectNonce,
+    localPairingCode,
+    handleIncomingBinaryChunk,
+    handleWsJsonMessage,
+    scanForPcServers,
+  ]);
 
   const sendFiles = useCallback(
     async (
@@ -1977,27 +2076,21 @@ export function useInstropEngine() {
     );
   }, []);
 
-  const connectToServer = useCallback((origin: string, optionalPairCode?: string) => {
-    const cleaned = origin.trim().replace(/\/+$/, '');
-    if (optionalPairCode && /^\d{6}$/.test(optionalPairCode)) {
-      pendingPairFromUrlRef.current = optionalPairCode;
-    }
-    reconnectAttemptRef.current = 0;
-    saveServerOrigin(cleaned);
-    setNearbyPeers([]);
-    setSelfDevice(null);
-    setServerOriginState(cleaned);
-  }, []);
+  const effectivePairingCode = selfDevice?.pairingCode || localPairingCode;
 
   return {
     deviceId,
     deviceOs,
     deviceType,
     selfDevice,
+    pairingCode: effectivePairingCode,
     connectionState,
     connectionError,
     serverOrigin,
     connectToServer,
+    scanningLan,
+    discoveredServerUrls,
+    scanForPcServers,
     nearbyPeers,
     mdnsPeers,
     lanUrls,

@@ -85,12 +85,158 @@ export function isMobileViewportOrAgent(): boolean {
   return /Android|iPhone|iPad|iPod/i.test(navigator.userAgent);
 }
 
+export function isMobileLocalhostShell(): boolean {
+  if (isNativeCapacitorApp()) return true;
+  if (typeof window === 'undefined') return false;
+  const host = window.location.hostname;
+  return isMobileViewportOrAgent() && (host === 'localhost' || host === '127.0.0.1');
+}
+
 export function hasCapacitorFilesystem(): boolean {
   return Boolean(getWindowExt().Capacitor?.Plugins?.Filesystem);
 }
 
 export function hasCapacitorLocalNotifications(): boolean {
   return Boolean(getWindowExt().Capacitor?.Plugins?.LocalNotifications);
+}
+
+async function detectDeviceLanIps(): Promise<string[]> {
+  if (typeof RTCPeerConnection === 'undefined') return [];
+  return await new Promise<string[]>((resolve) => {
+    const found = new Set<string>();
+    let settled = false;
+    let pc: RTCPeerConnection | null = null;
+
+    const finish = () => {
+      if (settled) return;
+      settled = true;
+      try {
+        pc?.close();
+      } catch {
+        // Ignore
+      }
+      resolve(Array.from(found));
+    };
+
+    try {
+      pc = new RTCPeerConnection({ iceServers: [] });
+      pc.createDataChannel('lan-probe');
+      pc.onicecandidate = (ev) => {
+        const cand = ev.candidate?.candidate;
+        if (!cand) {
+          finish();
+          return;
+        }
+        const match = cand.match(/\b(\d{1,3}(?:\.\d{1,3}){3})\b/);
+        if (match) {
+          const ip = match[1];
+          if (
+            ip.startsWith('192.168.') ||
+            ip.startsWith('10.') ||
+            /^172\.(1[6-9]|2\d|3[01])\./.test(ip)
+          ) {
+            found.add(ip);
+          }
+        }
+      };
+      void pc
+        .createOffer()
+        .then((offer) => pc?.setLocalDescription(offer))
+        .catch(finish);
+      window.setTimeout(finish, 450);
+    } catch {
+      finish();
+    }
+  });
+}
+
+async function probeInstropOrigin(origin: string, timeoutMs = 650): Promise<boolean> {
+  const controller = new AbortController();
+  const timer = window.setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const resp = await fetch(`${origin}/api/health`, {
+      method: 'GET',
+      mode: 'cors',
+      cache: 'no-store',
+      signal: controller.signal,
+    });
+    if (!resp.ok) return false;
+    const data = (await resp.json()) as { service?: string; status?: string };
+    return data?.service === 'instrop' || data?.status === 'ok';
+  } catch {
+    return false;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+export async function discoverLanInstropServers(): Promise<{
+  servers: string[];
+  mixedContentBlocked: boolean;
+}> {
+  if (typeof window !== 'undefined' && window.location.protocol === 'https:' && isMobileLocalhostShell()) {
+    return { servers: [], mixedContentBlocked: true };
+  }
+
+  const candidateIps: string[] = [];
+  const seen = new Set<string>();
+  const addIp = (ip: string) => {
+    if (!seen.has(ip)) {
+      seen.add(ip);
+      candidateIps.push(ip);
+    }
+  };
+
+  // Always check Windows Mobile Hotspot IP first
+  addIp('192.168.137.1');
+
+  const selfIps = await detectDeviceLanIps();
+  for (const selfIp of selfIps) {
+    const parts = selfIp.split('.');
+    if (parts.length !== 4) continue;
+    const prefix = `${parts[0]}.${parts[1]}.${parts[2]}`;
+    // Prioritize common router/host octets first, then scan the full /24 subnet
+    for (const host of [1, 2, 10, 100, 101, 102, 103, 104, 105]) {
+      const candidate = `${prefix}.${host}`;
+      if (candidate !== selfIp) addIp(candidate);
+    }
+    for (let i = 1; i <= 254; i++) {
+      const candidate = `${prefix}.${i}`;
+      if (candidate !== selfIp) addIp(candidate);
+    }
+  }
+
+  // If Android masked local IP via mDNS, scan the most common home/hotspot host ranges
+  if (selfIps.length === 0) {
+    const commonPrefixes = ['192.168.1', '192.168.0', '192.168.29', '192.168.43', '192.168.100', '10.0.0'];
+    for (const prefix of commonPrefixes) {
+      for (let i = 2; i <= 35; i++) addIp(`${prefix}.${i}`);
+      for (let i = 100; i <= 125; i++) addIp(`${prefix}.${i}`);
+    }
+  }
+
+  const discovered: string[] = [];
+  const batchSize = 36;
+  for (let i = 0; i < candidateIps.length; i += batchSize) {
+    const batch = candidateIps.slice(i, i + batchSize);
+    const results = await Promise.all(
+      batch.map(async (ip) => {
+        const origin = `http://${ip}:3000`;
+        const ok = await probeInstropOrigin(origin, 600);
+        return ok ? origin : null;
+      })
+    );
+    for (const hit of results) {
+      if (hit && !discovered.includes(hit)) {
+        discovered.push(hit);
+      }
+    }
+    if (discovered.length > 0) {
+      break;
+    }
+  }
+
+  return { servers: discovered, mixedContentBlocked: false };
 }
 
 export function supportsDesktopDirectoryPicker(): boolean {
