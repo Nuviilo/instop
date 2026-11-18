@@ -149,7 +149,17 @@ export function useInstropEngine() {
   const [incomingRequests, setIncomingRequests] = useState<PendingIncomingRequest[]>([]);
   const [transfers, setTransfers] = useState<ActiveTransferBatch[]>([]);
   const [toasts, setToasts] = useState<ToastNotice[]>([]);
-  const [serverOrigin, setServerOriginState] = useState<string>(() => loadServerOrigin());
+  const [serverOrigin, setServerOriginState] = useState<string>(() => {
+    if (
+      typeof window !== 'undefined' &&
+      !isMobileLocalhostShell() &&
+      (window.location.hostname === '127.0.0.1' || window.location.hostname === 'localhost')
+    ) {
+      saveServerOrigin('');
+      return '';
+    }
+    return loadServerOrigin();
+  });
   const [connectNonce, setConnectNonce] = useState<number>(0);
   const [scanningLan, setScanningLan] = useState<boolean>(false);
   const [discoveredServerUrls, setDiscoveredServerUrls] = useState<string[]>([]);
@@ -2048,7 +2058,15 @@ export function useInstropEngine() {
         });
         return false;
       }
-      if (cleaned === selfDeviceRef.current?.pairingCode) {
+      if (wsRef.current?.readyState !== WebSocket.OPEN) {
+        pushToast({
+          title: 'Not connected to PC server',
+          detail: 'Connect to your Windows PC first (Scan PC QR or PC Connection), then enter the 6-digit code.',
+          tone: 'error',
+        });
+        return false;
+      }
+      if (cleaned === selfDeviceRef.current?.pairingCode || cleaned === localPairingCode) {
         pushToast({
           title: 'Same device code',
           detail: 'Enter the 6-digit code shown on the other device.',
@@ -2058,7 +2076,7 @@ export function useInstropEngine() {
       }
       return sendWsJson({ type: 'pair:by-code', code: cleaned });
     },
-    [pushToast, sendWsJson]
+    [localPairingCode, pushToast, sendWsJson]
   );
 
   const pairById = useCallback(

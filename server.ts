@@ -50,19 +50,24 @@ function computeNetworkGroup(ip: string): string {
 
 function scoreLanInterface(name: string, address: string): number {
   const lower = name.toLowerCase();
-  // Deprioritize virtual adapters (WSL, Hyper-V, Docker, VirtualBox, VMware, VPNs)
+  // Deprioritize virtual, VPN, and tunnel adapters
   if (
-    /vethernet|wsl|hyper-v|virtualbox|vbox|vmware|docker|br-|virbr|tun|tap|tailscale|zerotier|hamachi|loopback/.test(
+    /vethernet|wsl|hyper-v|virtualbox|virtual|vbox|vmware|docker|br-|virbr|tun|tap|tailscale|zerotier|hamachi|loopback|wireguard|wintun|nord|proton|warp|cloudflare|vpn|radmin|openvpn|cisco|anyconnect/.test(
       lower
     )
   ) {
     return 100;
   }
-  if (address.startsWith('192.168.56.') || address.startsWith('172.17.') || address.startsWith('172.18.')) {
+  if (
+    address.startsWith('192.168.56.') ||
+    address.startsWith('172.17.') ||
+    address.startsWith('172.18.') ||
+    address.startsWith('100.')
+  ) {
     return 90;
   }
-  // Prefer Wi-Fi / WLAN / Hotspot and standard 192.168.x.x LANs first
-  if (/wi-fi|wifi|wlan|wireless|en0|eth/.test(lower) && address.startsWith('192.168.')) {
+  // Prefer Wi-Fi / WLAN and standard 192.168.x.x LANs first
+  if (/wi-fi|wifi|wlan|wireless|en0/.test(lower) && address.startsWith('192.168.')) {
     return 0;
   }
   if (/wi-fi|wifi|wlan|wireless/.test(lower)) {
@@ -84,7 +89,7 @@ function getLocalLanUrls(port: number): string[] {
     const list = interfaces[name];
     if (!list) continue;
     for (const iface of list) {
-      if (iface.family === 'IPv4' && !iface.internal) {
+      if (iface.family === 'IPv4' && !iface.internal && !iface.address.startsWith('169.254.')) {
         candidates.push({
           url: `http://${iface.address}:${port}`,
           score: scoreLanInterface(name, iface.address),
@@ -327,10 +332,17 @@ export async function startInstropServer(options: StartServerOptions = {}): Prom
           existing.ws.close(4001, 'Replaced by newer session');
         }
 
-        const pairingCode =
+        const preferred =
           typeof msg.preferredPairingCode === 'string' && /^\d{6}$/.test(msg.preferredPairingCode)
             ? msg.preferredPairingCode
-            : generateUniquePairingCode();
+            : '';
+        const preferredUsedByOther =
+          Boolean(preferred) &&
+          Array.from(clients.values()).some(
+            (c) => c.device.id !== deviceId && c.device.pairingCode === preferred
+          );
+        const pairingCode =
+          preferred && !preferredUsedByOther ? preferred : generateUniquePairingCode();
 
         const trustedArray = Array.isArray(msg.trustedIds)
           ? msg.trustedIds.filter((x): x is string => typeof x === 'string')

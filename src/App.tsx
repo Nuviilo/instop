@@ -5,7 +5,6 @@ import {
   Home,
   Laptop,
   Moon,
-  QrCode,
   Settings as SettingsIcon,
   Sun,
   X,
@@ -19,7 +18,6 @@ import { DevicesView } from './components/DevicesView';
 import { TransfersView } from './components/TransfersView';
 import { HistoryView } from './components/HistoryView';
 import { SettingsView } from './components/SettingsView';
-import { PairingModal } from './components/PairingModal';
 import { IncomingRequestModal } from './components/IncomingRequestModal';
 
 const NAV_ITEMS: Array<{ id: NavTab; label: string; icon: React.ComponentType<{ className?: string }> }> = [
@@ -34,7 +32,6 @@ export default function App() {
   const engine = useInstropEngine();
   const [activeTab, setActiveTab] = useState<NavTab>('home');
   const [selectedPeerId, setSelectedPeerId] = useState<string | null>(null);
-  const [pairingOpen, setPairingOpen] = useState(false);
   const [resolvedDark, setResolvedDark] = useState(false);
 
   // Sync Tailwind v4 .dark class with light / dark / system preference
@@ -75,6 +72,7 @@ export default function App() {
 
   const currentNavTitle = NAV_ITEMS.find((n) => n.id === activeTab)?.label || 'Home';
   const topIncomingRequest = engine.incomingRequests[0] || null;
+  const isConnected = engine.connectionState === 'connected';
 
   return (
     <div className="min-h-screen bg-[#FAFAFB] dark:bg-[#09090B] text-[#09090B] dark:text-[#FAFAFA] flex flex-col md:flex-row">
@@ -147,14 +145,14 @@ export default function App() {
             Instrop / <span className="text-zinc-950 dark:text-zinc-50">{currentNavTitle}</span>
           </p>
 
-          <button
-            type="button"
-            onClick={() => setPairingOpen(true)}
-            className="min-h-[36px] px-3.5 py-1.5 rounded-xl bg-zinc-900 dark:bg-zinc-100 text-white dark:text-zinc-900 text-xs font-medium hover:opacity-90 transition-opacity inline-flex items-center gap-1.5 whitespace-nowrap shrink-0"
-          >
-            <QrCode className="w-3.5 h-3.5" />
-            Pair Device
-          </button>
+          <span className="inline-flex items-center gap-2 text-xs text-zinc-500 dark:text-zinc-400 whitespace-nowrap shrink-0">
+            <span
+              className={`w-2 h-2 rounded-full ${
+                isConnected ? 'bg-emerald-500' : 'bg-amber-500'
+              }`}
+            />
+            {isConnected ? 'Online' : 'Offline'}
+          </span>
         </header>
 
         {/* Mobile Top App Bar (Android / Compact Viewports with Safe-Area Support) */}
@@ -167,14 +165,14 @@ export default function App() {
               </span>
             </div>
 
-            <button
-              type="button"
-              onClick={() => setPairingOpen(true)}
-              className="min-h-[40px] px-3 py-1.5 rounded-lg bg-zinc-900 dark:bg-zinc-100 text-white dark:text-zinc-900 text-xs font-medium inline-flex items-center gap-1.5 whitespace-nowrap shrink-0"
-            >
-              <QrCode className="w-3.5 h-3.5" />
-              Pair
-            </button>
+            <span className="inline-flex items-center gap-1.5 text-xs text-zinc-500 dark:text-zinc-400 whitespace-nowrap shrink-0">
+              <span
+                className={`w-2 h-2 rounded-full ${
+                  isConnected ? 'bg-emerald-500' : 'bg-amber-500'
+                }`}
+              />
+              {isConnected ? 'Online' : 'Offline'}
+            </span>
           </div>
         </header>
 
@@ -197,17 +195,12 @@ export default function App() {
                   connectionState={engine.connectionState}
                   connectionError={engine.connectionError}
                   lanUrls={engine.lanUrls}
-                  serverOrigin={engine.serverOrigin}
-                  onConnectToServer={engine.connectToServer}
-                  scanningLan={engine.scanningLan}
-                  discoveredServerUrls={engine.discoveredServerUrls}
-                  onScanForPc={() => void engine.scanForPcServers(true)}
                   nearbyPeers={engine.nearbyPeers}
                   trustedDevices={engine.trustedDevices}
                   selectedPeerId={selectedPeerId}
                   onSelectPeer={setSelectedPeerId}
                   onRenameSelf={(name) => engine.updateSettings({ deviceName: name })}
-                  onOpenPairing={() => setPairingOpen(true)}
+                  onOpenDevices={() => setActiveTab('devices')}
                   onSendFiles={(peer, files, isFolder, folderName) =>
                     void engine.sendFiles(peer, files, isFolder, folderName)
                   }
@@ -220,10 +213,18 @@ export default function App() {
               {activeTab === 'devices' && (
                 <DevicesView
                   selfDevice={engine.selfDevice}
+                  pairingCode={engine.pairingCode}
+                  connectionState={engine.connectionState}
+                  connectionError={engine.connectionError}
+                  lanUrls={engine.lanUrls}
+                  serverOrigin={engine.serverOrigin}
+                  onConnectToServer={engine.connectToServer}
+                  scanningLan={engine.scanningLan}
+                  discoveredServerUrls={engine.discoveredServerUrls}
+                  onScanForPc={() => void engine.scanForPcServers(true)}
                   nearbyPeers={engine.nearbyPeers}
                   mdnsPeers={engine.mdnsPeers}
                   trustedDevices={engine.trustedDevices}
-                  onOpenPairing={() => setPairingOpen(true)}
                   onPairByCode={engine.pairByCode}
                   onPairById={engine.pairById}
                   onTrustPeer={(peer) => engine.trustPeer(peer)}
@@ -269,8 +270,6 @@ export default function App() {
                   selfDevice={engine.selfDevice}
                   trustedDevices={engine.trustedDevices}
                   lanUrls={engine.lanUrls}
-                  serverOrigin={engine.serverOrigin}
-                  onConnectToServer={engine.connectToServer}
                   onUpdateSettings={engine.updateSettings}
                   onRevokeTrusted={engine.revokeTrustedDevice}
                   onNotify={engine.pushToast}
@@ -312,19 +311,6 @@ export default function App() {
           })}
         </div>
       </nav>
-
-      {/* Modals & Live Toasts */}
-      <PairingModal
-        open={pairingOpen}
-        onClose={() => setPairingOpen(false)}
-        selfDevice={engine.selfDevice}
-        pairingCode={engine.pairingCode}
-        lanUrls={engine.lanUrls}
-        serverOrigin={engine.serverOrigin}
-        isConnected={engine.connectionState === 'connected'}
-        onConnectToServer={engine.connectToServer}
-        onPairByCode={engine.pairByCode}
-      />
 
       <IncomingRequestModal
         request={topIncomingRequest}

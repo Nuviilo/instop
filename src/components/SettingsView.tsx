@@ -34,8 +34,6 @@ interface SettingsViewProps {
   selfDevice: PeerDevice | null;
   trustedDevices: TrustedDeviceRecord[];
   lanUrls: string[];
-  serverOrigin: string;
-  onConnectToServer: (origin: string) => void;
   onUpdateSettings: (patch: Partial<InstropSettings>) => void;
   onRevokeTrusted: (id: string) => void;
   onNotify: (toast: {
@@ -50,15 +48,12 @@ export function SettingsView({
   selfDevice,
   trustedDevices,
   lanUrls,
-  serverOrigin,
-  onConnectToServer,
   onUpdateSettings,
   onRevokeTrusted,
   onNotify,
 }: SettingsViewProps) {
   const [nameInput, setNameInput] = useState(settings.deviceName);
   const [nameSaved, setNameSaved] = useState(false);
-  const [serverInput, setServerInput] = useState(serverOrigin);
   const [folderEditorOpen, setFolderEditorOpen] = useState(false);
   const [customFolderInput, setCustomFolderInput] = useState(
     settings.downloadFolderLabel || 'Documents/Instrop'
@@ -475,49 +470,6 @@ export function SettingsView({
             className="w-4 h-4 rounded border-zinc-300 text-indigo-600 focus:ring-indigo-500"
           />
         </label>
-
-        <div className="pt-2 border-t border-zinc-200/70 dark:border-zinc-800/70 space-y-2">
-          <label
-            htmlFor="settings-server-origin"
-            className="block text-xs font-medium text-zinc-600 dark:text-zinc-400"
-          >
-            Remote / Windows PC Server Address (leave blank for this host)
-          </label>
-          <form
-            onSubmit={(e) => {
-              e.preventDefault();
-              onConnectToServer(serverInput);
-            }}
-            className="flex flex-col sm:flex-row gap-2"
-          >
-            <input
-              id="settings-server-origin"
-              type="text"
-              value={serverInput}
-              onChange={(e) => setServerInput(e.target.value)}
-              placeholder="e.g. 192.168.1.15:3000"
-              className="flex-1 h-10 px-3 rounded-xl border border-zinc-200 dark:border-zinc-800 bg-zinc-50 dark:bg-zinc-900 font-mono text-xs text-zinc-950 dark:text-zinc-50 focus:outline-none focus:ring-2 focus:ring-indigo-500"
-            />
-            <button
-              type="submit"
-              className="min-h-[40px] px-4 py-2 rounded-xl bg-zinc-900 dark:bg-zinc-100 text-white dark:text-zinc-900 text-xs font-medium transition-opacity hover:opacity-90 whitespace-nowrap"
-            >
-              Apply Server
-            </button>
-            {serverOrigin && (
-              <button
-                type="button"
-                onClick={() => {
-                  setServerInput('');
-                  onConnectToServer('');
-                }}
-                className="min-h-[40px] px-3 py-2 rounded-xl border border-zinc-200 dark:border-zinc-800 text-xs font-medium text-zinc-600 dark:text-zinc-300 hover:bg-zinc-50 dark:hover:bg-zinc-900 whitespace-nowrap"
-              >
-                Reset
-              </button>
-            )}
-          </form>
-        </div>
 
         {lanUrls.length > 0 && (
           <div className="pt-2 border-t border-zinc-200/70 dark:border-zinc-800/70 space-y-1.5">
